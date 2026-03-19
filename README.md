@@ -2,7 +2,10 @@
 
 <div align="center">
 
-# memU
+# AyanamiMem
+
+> [!IMPORTANT]  
+> Fork from [memU](https://github.com/NevaMind-AI/memU), now under development.
 
 ### 24/7 Always-On Proactive Memory for AI Agents
 
