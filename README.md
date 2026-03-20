@@ -1,11 +1,6 @@
-![MemU Banner](assets/banner.png)
-
 <div align="center">
 
 # AyanamiMem
-
-> [!IMPORTANT]  
-> Fork from [memU](https://github.com/NevaMind-AI/memU), now under development.
 
 ### 24/7 Always-On Proactive Memory for AI Agents
 
@@ -20,6 +15,9 @@
 **[English](readme/README_en.md) | [中文](readme/README_zh.md) | [日本語](readme/README_ja.md) | [한국어](readme/README_ko.md) | [Español](readme/README_es.md) | [Français](readme/README_fr.md)**
 
 </div>
+
+> [!IMPORTANT]  
+> Fork from [memU](https://github.com/NevaMind-AI/memU), now under development.
 
 ---
 
