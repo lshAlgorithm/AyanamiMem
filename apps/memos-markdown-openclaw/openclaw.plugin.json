@@ -1,0 +1,41 @@
+{
+  "id": "memos-markdown-openclaw-plugin",
+  "name": "MemOS Markdown Memory",
+  "description": "Tree-structured markdown memory with local embedding search. Stores memories as human-readable .md files. No database required.",
+  "version": "0.1.0",
+  "kind": "lifecycle",
+  "main": "./index.mjs",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "bridgePort": {
+        "type": "number",
+        "description": "Port for the Python memory bridge (default 18832)"
+      },
+      "memoryDir": {
+        "type": "string",
+        "description": "Directory for .md memory files (default ~/.openclaw/memos-markdown)"
+      },
+      "chatModel": {
+        "type": "string",
+        "description": "LLM model for memory extraction (default deepseek/deepseek-chat)"
+      },
+      "embedderModel": {
+        "type": "string",
+        "description": "Local sentence-transformer model (default sentence-transformers/all-MiniLM-L6-v2)"
+      }
+    }
+  },
+  "requirements": {
+    "node": ">=18.0.0"
+  },
+  "setup": {
+    "notes": [
+      "Requires Python 3.10+ with MemOS installed (pip install memos or from source)",
+      "Requires sentence-transformers package (pip install sentence-transformers)",
+      "Set OPENAI_API_KEY and OPENAI_BASE_URL for LLM memory extraction",
+      "Memory files stored at ~/.openclaw/memos-markdown/ as human-readable .md files"
+    ]
+  }
+}

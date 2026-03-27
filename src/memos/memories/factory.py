@@ -9,6 +9,9 @@ from memos.memories.parametric.base import BaseParaMemory
 from memos.memories.parametric.lora import LoRAMemory
 from memos.memories.textual.base import BaseTextMemory
 from memos.memories.textual.general import GeneralTextMemory
+from memos.memories.textual.hierarchical_markdown_memory import HierarchicalMarkdownMemory
+from memos.memories.textual.markdown import MarkdownTextMemory
+from memos.memories.textual.markdown_tree import MarkdownTreeTextMemory
 from memos.memories.textual.naive import NaiveTextMemory
 from memos.memories.textual.preference import PreferenceTextMemory
 from memos.memories.textual.simple_preference import SimplePreferenceTextMemory
@@ -22,6 +25,9 @@ class MemoryFactory(BaseMemory):
     backend_to_class: ClassVar[dict[str, Any]] = {
         "naive_text": NaiveTextMemory,
         "general_text": GeneralTextMemory,
+        "markdown_text": MarkdownTextMemory,
+        "markdown_tree_text": MarkdownTreeTextMemory,
+        "hierarchical_markdown": HierarchicalMarkdownMemory,
         "tree_text": TreeTextMemory,
         "simple_tree_text": SimpleTreeTextMemory,
         "pref_text": PreferenceTextMemory,

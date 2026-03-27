@@ -140,6 +140,96 @@ class GeneralTextMemoryConfig(BaseTextMemoryConfig):
     )
 
 
+class MarkdownTextMemoryConfig(BaseTextMemoryConfig):
+    """Markdown file-based textual memory configuration.
+
+    Each memory is stored as a human-readable ``.md`` file with YAML
+    frontmatter (metadata), a body (memory content), and an optional
+    ``## Edges`` section that encodes relationships to other nodes.
+
+    Retrieval is done locally via ``sentence-transformers`` cosine
+    similarity on the ``key`` field — no external API calls required.
+    """
+
+    memory_dir: str = Field(
+        default=".memos/markdown",
+        description="Root directory where individual .md memory files are stored.",
+    )
+
+    extractor_llm: LLMConfigFactory = Field(
+        ...,
+        default_factory=LLMConfigFactory,
+        description="LLM configuration for extracting memories from conversations.",
+    )
+
+    embedder: EmbedderConfigFactory = Field(
+        ...,
+        default_factory=EmbedderConfigFactory,
+        description="Embedder configuration for local key-similarity search.",
+    )
+
+
+class HierarchicalMarkdownMemoryConfig(BaseTextMemoryConfig):
+    """Lossless hierarchical summary-tree memory stored as Markdown files.
+
+    The filesystem directory structure mirrors the summary tree.  Leaves are
+    raw chat chunks; internal nodes are LLM-generated summaries.  No database
+    required — everything is ``.md`` files on disk.
+    """
+
+    memory_dir: str = Field(
+        default=".memos/memory",
+        description="Root directory of the memory filesystem tree.",
+    )
+
+    extractor_llm: LLMConfigFactory = Field(
+        ...,
+        default_factory=LLMConfigFactory,
+        description="LLM used to summarise chunks into condensed nodes.",
+    )
+
+    embedder: EmbedderConfigFactory = Field(
+        ...,
+        default_factory=EmbedderConfigFactory,
+        description="Local embedder for leaf and summary keys.",
+    )
+
+    fresh_tail_count: int = Field(
+        default=32,
+        description="Number of recent leaves always kept in _fresh/, never compacted.",
+    )
+
+    leaf_chunk_tokens: int = Field(
+        default=2048,
+        description="Maximum tokens per leaf chunk before splitting.",
+    )
+
+    condensed_target_tokens: int = Field(
+        default=512,
+        description="Target summary token count for condensed nodes.",
+    )
+
+    condensed_min_fanout: int = Field(
+        default=4,
+        description="Minimum children before a condensed node is created.",
+    )
+
+    context_threshold: float = Field(
+        default=0.75,
+        description="Fraction of leaf_chunk_tokens that triggers compaction.",
+    )
+
+    max_depth: int = Field(
+        default=-1,
+        description="Maximum condensation depth. -1 = unlimited.",
+    )
+
+    git_auto_commit: bool = Field(
+        default=False,
+        description="If True, auto-commit every compaction/mutation to git.",
+    )
+
+
 class TreeTextMemoryConfig(BaseTextMemoryConfig):
     """Tree text memory configuration class."""
 
@@ -299,6 +389,9 @@ class MemoryConfigFactory(BaseConfig):
     backend_to_class: ClassVar[dict[str, Any]] = {
         "naive_text": NaiveTextMemoryConfig,
         "general_text": GeneralTextMemoryConfig,
+        "markdown_text": MarkdownTextMemoryConfig,
+        "markdown_tree_text": MarkdownTextMemoryConfig,
+        "hierarchical_markdown": HierarchicalMarkdownMemoryConfig,
         "simple_tree_text": SimpleTreeTextMemoryConfig,
         "tree_text": TreeTextMemoryConfig,
         "pref_text": PreferenceTextMemoryConfig,

@@ -1,6 +1,9 @@
 # MemOS home
 .memos/
 
+*.md
+!docs/*.md
+
 # Temporary files
 tmp/
 **/tmp_data/
