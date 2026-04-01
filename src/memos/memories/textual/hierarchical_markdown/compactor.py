@@ -240,16 +240,31 @@ class Compactor:
         return compacted_count
 
     def condensation_pass(self, depth: int = 1) -> int:
-        """Condense sibling directories at *depth* under a new parent.
+        """Condense sibling directories whose ``_summary.md`` has the given *depth*.
 
-        Scans ``memory_dir`` for subdirectories at the given depth that have
-        enough siblings to exceed ``condensed_min_fanout``.  Groups them under
-        a new parent directory with a higher depth.
+        Scans ``memory_dir`` for subdirectories whose summary ``depth`` field
+        matches *depth*.  If enough exist (>= ``condensed_min_fanout``), groups
+        them by embedding similarity under new parent directories.
 
         Returns the number of directories condensed.
         """
-        # Find all subdirectories at the target depth
-        target_dirs = self._dirs_at_depth(self.memory_dir, depth, current_depth=0)
+        # Find all direct-child dirs in memory_dir with _summary.md at the target depth
+        target_dirs: list[str] = []
+        parent_dir = self.memory_dir
+        for entry in sorted(os.listdir(parent_dir)):
+            if entry.startswith("_"):
+                continue
+            full = os.path.join(parent_dir, entry)
+            if not os.path.isdir(full):
+                continue
+            summary_path = os.path.join(full, SUMMARY_FILENAME)
+            if os.path.isfile(summary_path):
+                from memos.memories.textual.hierarchical_markdown.fs import read_md
+
+                meta, _body, _edges = read_md(summary_path)
+                if meta.get("depth") == depth:
+                    target_dirs.append(full)
+
         if len(target_dirs) < self.condensed_min_fanout:
             return 0
 

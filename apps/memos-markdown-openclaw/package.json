@@ -1,12 +1,24 @@
 {
   "name": "@memtensor/memos-markdown-openclaw-plugin",
   "version": "0.1.0",
-  "description": "Tree-structured markdown memory plugin for OpenClaw. Human-readable .md files, local embedding search, no database.",
+  "description": "Hierarchical markdown memory plugin for OpenClaw. RAPTOR-style summary tree stored as human-readable .md files. No database.",
   "type": "module",
   "main": "./index.mjs",
+  "files": [
+    "index.mjs",
+    "bridge.py",
+    "openclaw.plugin.json",
+    "README.md"
+  ],
+  "openclaw": {
+    "id": "memos-markdown-openclaw-plugin",
+    "extensions": [
+      "./index.mjs"
+    ]
+  },
   "license": "MIT",
   "engines": {
     "node": ">=18.0.0"
   },
-  "keywords": ["openclaw", "plugin", "memory", "markdown", "memos"]
+  "keywords": ["openclaw", "plugin", "memory", "markdown", "memos", "hierarchical"]
 }
