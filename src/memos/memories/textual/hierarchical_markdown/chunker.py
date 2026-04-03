@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Any
 
 from memos.log import get_logger
-from memos.memories.textual.hierarchical_markdown.embeddings import EmbeddingIndex
+from memos.memories.textual.hierarchical_markdown.embeddings import EmbeddingCache
 from memos.memories.textual.hierarchical_markdown.fs import (
     FRESH_DIR,
     leaf_filename,
@@ -58,10 +58,12 @@ class ChatChunker:
         memory_dir: str,
         embedder: Any,
         leaf_chunk_tokens: int = 2048,
+        emb_cache: EmbeddingCache | None = None,
     ) -> None:
         self.memory_dir = memory_dir
         self.embedder = embedder
         self.leaf_chunk_tokens = leaf_chunk_tokens
+        self._emb_cache = emb_cache
         self._fresh_dir = os.path.join(memory_dir, FRESH_DIR)
 
     def chunk(
@@ -113,10 +115,12 @@ class ChatChunker:
             except Exception:
                 logger.warning("Failed to embed leaf key: %s", key)
 
-        # Batch-update embeddings index
-        if emb_updates:
-            idx = EmbeddingIndex(self._fresh_dir)
-            idx.update(emb_updates)
+        # Update in-memory embedding cache
+        if emb_updates and self._emb_cache is not None:
+            full_path_updates = {
+                os.path.join(self._fresh_dir, fname): vec for fname, vec in emb_updates.items()
+            }
+            self._emb_cache.update(full_path_updates)
 
         logger.info("Chunked %d messages into %d leaves in _fresh/", len(messages), len(written))
         return written

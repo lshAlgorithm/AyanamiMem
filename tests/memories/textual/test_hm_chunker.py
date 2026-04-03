@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from memos.memories.textual.hierarchical_markdown.chunker import ChatChunker
-from memos.memories.textual.hierarchical_markdown.embeddings import EmbeddingIndex
+from memos.memories.textual.hierarchical_markdown.embeddings import EmbeddingCache
 from memos.memories.textual.hierarchical_markdown.fs import FRESH_DIR, read_md
 
 
@@ -20,7 +20,8 @@ def mock_embedder():
 
 @pytest.fixture()
 def chunker(tmp_path, mock_embedder):
-    return ChatChunker(str(tmp_path), mock_embedder, leaf_chunk_tokens=200)
+    cache = EmbeddingCache()
+    return ChatChunker(str(tmp_path), mock_embedder, leaf_chunk_tokens=200, emb_cache=cache)
 
 
 class TestChunkerBasic:
@@ -77,11 +78,14 @@ class TestChunkerBasic:
         assert files[0].startswith("001-")
         assert files[1].startswith("002-")
 
-    def test_embeddings_index_updated(self, chunker, tmp_path):
+    def test_embeddings_cache_updated(self, chunker, tmp_path):
+        """Leaf key should be registered in the in-memory EmbeddingCache."""
         chunker.chunk([{"role": "user", "content": "Test embedding index."}])
-        idx = EmbeddingIndex(str(tmp_path / FRESH_DIR))
-        data = idx.read()
-        assert len(data) == 1
+        # Access the cache that was passed in during fixture construction
+        cache = chunker._emb_cache
+        fresh_dir = str(tmp_path / FRESH_DIR)
+        children = cache.children_of(fresh_dir)
+        assert len(children) == 1
 
     def test_session_id_in_metadata(self, chunker, tmp_path):
         written = chunker.chunk([{"role": "user", "content": "Hello."}], session_id="my-session")

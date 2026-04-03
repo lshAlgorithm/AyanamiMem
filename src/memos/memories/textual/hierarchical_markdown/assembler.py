@@ -14,7 +14,7 @@ from typing import Any
 import numpy as np
 
 from memos.log import get_logger
-from memos.memories.textual.hierarchical_markdown.embeddings import EmbeddingIndex
+from memos.memories.textual.hierarchical_markdown.embeddings import EmbeddingCache
 from memos.memories.textual.hierarchical_markdown.fs import (
     FRESH_DIR,
     SUMMARY_FILENAME,
@@ -52,9 +52,12 @@ class Assembler:
         embedder: Embedder instance (must expose ``embed(texts) -> list[list[float]]``).
     """
 
-    def __init__(self, memory_dir: str, embedder: Any) -> None:
+    def __init__(
+        self, memory_dir: str, embedder: Any, emb_cache: EmbeddingCache | None = None
+    ) -> None:
         self.memory_dir = memory_dir
         self.embedder = embedder
+        self._emb_cache = emb_cache
         self._fresh_dir = os.path.join(memory_dir, FRESH_DIR)
 
     def assemble(
@@ -101,7 +104,9 @@ class Assembler:
 
         # ── Phase 2: Top-down walk ────────────────────────────────────────
         try:
-            query_vec = np.array(self.embedder.embed([query])[0], dtype=np.float64)
+            query_vec = np.array(
+                self.embedder.embed([query])[0], dtype=np.float64
+            )  # TODO: not only query, maybe...
         except Exception:
             logger.warning("Failed to embed query, returning fresh tail only")
             return results
@@ -191,8 +196,8 @@ class Assembler:
         if os.path.basename(dir_path) == FRESH_DIR:
             return []
 
-        idx = EmbeddingIndex(dir_path)
-        emb_data = idx.read()
+        idx = self._emb_cache
+        emb_data = idx.children_of(dir_path) if idx is not None else {}
 
         if not emb_data:
             return []
@@ -234,8 +239,7 @@ class Assembler:
 
                     # Decide: use summary or descend?
                     # Descend if budget allows and the directory has embeddings
-                    sub_idx = EmbeddingIndex(child_path)
-                    sub_emb = sub_idx.read()
+                    sub_emb = self._emb_cache.children_of(child_path) if self._emb_cache else {}
 
                     if sub_emb and remaining > summary_tokens * 2:
                         # Budget allows deeper exploration

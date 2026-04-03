@@ -28,6 +28,11 @@ API_BASE = os.environ.get("OPENAI_BASE_URL", os.environ.get("OPENAI_API_BASE", "
 CHAT_MODEL = os.environ.get("MOS_CHAT_MODEL", "deepseek/deepseek-chat")
 EMBEDDER_MODEL = os.environ.get("EMBEDDER_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
 
+# If EMBEDDER_MODEL is a local path, force offline mode
+if os.path.isdir(EMBEDDER_MODEL):
+    os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+    os.environ.setdefault("HF_DATASETS_OFFLINE", "1")
+
 if not API_KEY:
     print("❌ Set OPENAI_API_KEY (and OPENAI_BASE_URL if using OpenRouter)")
     sys.exit(1)

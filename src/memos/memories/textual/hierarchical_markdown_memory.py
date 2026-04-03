@@ -20,6 +20,7 @@ from memos.memories.textual.base import BaseTextMemory
 from memos.memories.textual.hierarchical_markdown.assembler import Assembler
 from memos.memories.textual.hierarchical_markdown.chunker import ChatChunker
 from memos.memories.textual.hierarchical_markdown.compactor import Compactor
+from memos.memories.textual.hierarchical_markdown.embeddings import EmbeddingCache
 from memos.memories.textual.hierarchical_markdown.fs import (
     FRESH_DIR,
     SUMMARY_FILENAME,
@@ -80,19 +81,32 @@ class HierarchicalMarkdownMemory(BaseTextMemory):
         self.llm = LLMFactory.from_config(config.extractor_llm)
         self.embedder = EmbedderFactory.from_config(config.embedder)
 
+        # Single in-memory embedding cache shared across all components
+        self._emb_cache = EmbeddingCache()
+
         self.summarizer = HierarchicalSummarizer(
             self.llm, self.embedder, config.condensed_target_tokens
         )
-        self.chunker = ChatChunker(self.memory_dir, self.embedder, config.leaf_chunk_tokens)
+        self.chunker = ChatChunker(
+            self.memory_dir,
+            self.embedder,
+            config.leaf_chunk_tokens,
+            emb_cache=self._emb_cache,
+        )
         self.compactor = Compactor(
             memory_dir=self.memory_dir,
             summarizer=self.summarizer,
             embedder=self.embedder,
             fresh_tail_count=config.fresh_tail_count,
             condensed_min_fanout=config.condensed_min_fanout,
+            compact_threshold=config.compact_threshold,
+            similarity_threshold=config.compact_similarity_threshold,
+            emb_cache=self._emb_cache,
         )
-        self.assembler = Assembler(self.memory_dir, self.embedder)
-        self.updater = Updater(self.memory_dir, self.summarizer, self.embedder)
+        self.assembler = Assembler(self.memory_dir, self.embedder, emb_cache=self._emb_cache)
+        self.updater = Updater(
+            self.memory_dir, self.summarizer, self.embedder, emb_cache=self._emb_cache
+        )
 
         # Path→UUID cache for fast lookups
         self._path_cache: dict[str, str] = {}
@@ -159,14 +173,10 @@ class HierarchicalMarkdownMemory(BaseTextMemory):
             self._register_path(fpath, item_id)
             new_ids.append(item_id)
 
-            # Update embeddings
+            # Update in-memory embedding cache
             try:
-                from memos.memories.textual.hierarchical_markdown.embeddings import (
-                    EmbeddingIndex,
-                )
-
                 vec = self.embedder.embed([meta["key"]])[0]
-                EmbeddingIndex(fresh_dir).update({fname: vec})
+                self._emb_cache.update({fpath: vec})
             except Exception:
                 logger.warning("Failed to embed new leaf: %s", fname)
 
@@ -311,26 +321,48 @@ class HierarchicalMarkdownMemory(BaseTextMemory):
                 shutil.rmtree(target)
             shutil.copytree(self.memory_dir, target)
 
-    def load(self, dir: str) -> None:
+    def load(self, dir: str) -> None:  # noqa: A002
         """Load memory tree from *dir* (set as the new memory_dir)."""
         dir_path = dir
         self.memory_dir = os.path.abspath(dir_path)
-        self.chunker = ChatChunker(self.memory_dir, self.embedder, self.config.leaf_chunk_tokens)
+        self.chunker = ChatChunker(
+            self.memory_dir,
+            self.embedder,
+            self.config.leaf_chunk_tokens,
+            emb_cache=self._emb_cache,
+        )
         self.compactor = Compactor(
             memory_dir=self.memory_dir,
             summarizer=self.summarizer,
             embedder=self.embedder,
             fresh_tail_count=self.config.fresh_tail_count,
             condensed_min_fanout=self.config.condensed_min_fanout,
+            compact_threshold=self.config.compact_threshold,
+            similarity_threshold=self.config.compact_similarity_threshold,
+            emb_cache=self._emb_cache,
         )
-        self.assembler = Assembler(self.memory_dir, self.embedder)
-        self.updater = Updater(self.memory_dir, self.summarizer, self.embedder)
+        self.assembler = Assembler(self.memory_dir, self.embedder, emb_cache=self._emb_cache)
+        self.updater = Updater(
+            self.memory_dir, self.summarizer, self.embedder, emb_cache=self._emb_cache
+        )
         self._rebuild_cache()
         logger.info("Loaded memory tree from %s", dir_path)
 
-    def compact(self) -> None:
-        """Manually trigger compaction."""
-        self.compactor.compact_incremental()
+    def compact(self, force: bool = False) -> dict[str, int]:
+        """Trigger compaction and rebuild the path cache.
+
+        Args:
+            force: Bypass ``should_compact()`` threshold and always run
+                   ``leaf_pass``.  The lock, full depth cascade, and
+                   exception handling inside ``compact_incremental`` are
+                   always preserved.
+
+        Returns:
+            ``{"leaves_compacted": N, "dirs_condensed": M}``
+        """
+        result = self.compactor.compact_incremental(force=force)
+        self._rebuild_cache()
+        return result
 
     def get_tree_index(self) -> str:
         """Return a human-readable tree index (like ``tree`` command output)."""
@@ -377,20 +409,73 @@ class HierarchicalMarkdownMemory(BaseTextMemory):
             self._uuid_cache.pop(item_id, None)
 
     def _rebuild_cache(self) -> None:
-        """Rebuild the path↔UUID cache by scanning the filesystem."""
+        """Rebuild path↔UUID cache + embedding cache from the filesystem.
+
+        Also removes any stale ``_embeddings.json`` files found on disk —
+        embeddings are now held exclusively in memory.
+        """
         self._path_cache.clear()
         self._uuid_cache.clear()
-        for path in walk_tree(self.memory_dir):
-            item_id = _path_to_uuid(path)
-            self._register_path(path, item_id)
-        # Also index _fresh/
+        self._emb_cache.clear()
+
+        # Collect all .md paths, distinguishing summaries from leaves
+        all_paths: list[str] = walk_tree(self.memory_dir)
         fresh_dir = os.path.join(self.memory_dir, FRESH_DIR)
         if os.path.isdir(fresh_dir):
-            for fname in os.listdir(fresh_dir):
+            for fname in sorted(os.listdir(fresh_dir)):
                 if fname.endswith(".md") and not fname.startswith("_"):
-                    fpath = os.path.join(fresh_dir, fname)
-                    item_id = _path_to_uuid(fpath)
-                    self._register_path(fpath, item_id)
+                    all_paths.append(os.path.join(fresh_dir, fname))
+
+        # Register paths in UUID cache
+        for path in all_paths:
+            item_id = _path_to_uuid(path)
+            self._register_path(path, item_id)
+
+        # Batch-embed all keys from frontmatter
+        cache_keys: list[str] = []  # embedding cache key (dir or leaf path)
+        embed_texts: list[str] = []  # key phrase to embed
+
+        for path in all_paths:
+            try:
+                meta, _, _ = read_md(path)
+                key = meta.get("key", "")
+                if not key:
+                    continue
+                # For _summary.md → cache key is the parent directory
+                if os.path.basename(path) == SUMMARY_FILENAME:
+                    cache_key = os.path.dirname(path)
+                else:
+                    cache_key = path
+                cache_keys.append(cache_key)
+                embed_texts.append(key)
+            except Exception:
+                logger.warning("Could not read key from %s", path)
+
+        if embed_texts:
+            try:
+                vecs = self.embedder.embed(embed_texts)
+                self._emb_cache.update({k: v for k, v in zip(cache_keys, vecs)})
+            except Exception:
+                logger.warning("Batch embed failed during _rebuild_cache; cache empty")
+
+        # Delete stale _embeddings.json files from disk
+        self._cleanup_json_index_files(self.memory_dir)
+        logger.info(
+            "Cache rebuilt: %d paths, %d embeddings",
+            len(self._path_cache),
+            len(self._emb_cache),
+        )
+
+    @staticmethod
+    def _cleanup_json_index_files(root_dir: str) -> None:
+        """Remove ``_embeddings.json`` and ``_embeddings.json.lock`` files."""
+        for dirpath, _dirs, files in os.walk(root_dir):
+            for fname in files:
+                if fname in ("_embeddings.json", "_embeddings.json.lock", "_embeddings.json.tmp"):
+                    try:
+                        os.remove(os.path.join(dirpath, fname))
+                    except OSError:
+                        pass
 
     def _render_tree(self, dir_path: str, lines: list[str], indent: int) -> None:
         """Recursively render the directory tree."""

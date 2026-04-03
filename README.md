@@ -1,369 +1,505 @@
 <div align="center">
-  <a href="https://memos.openmem.net/">
-    <img src="https://statics.memtensor.com.cn/memos/memos-banner.gif" alt="MemOS Banner">
-  </a>
 
-  <h1 align="center">
-    <img src="https://statics.memtensor.com.cn/logo/memos_color_m.png" alt="MemOS Logo" width="50"/>
-    MemOS 2.0: 星尘（Stardust）
-    <img src="https://img.shields.io/badge/status-Preview-blue" alt="Preview Badge"/>
-  </h1>
+# AyanamiMem
 
-  <p>
-    <a href="https://www.memtensor.com.cn/">
-      <img alt="Static Badge" src="https://img.shields.io/badge/Maintained_by-MemTensor-blue">
-    </a>
-    <a href="https://pypi.org/project/MemoryOS">
-      <img src="https://img.shields.io/pypi/v/MemoryOS?label=pypi%20package" alt="PyPI Version">
-    </a>
-    <a href="https://pypi.org/project/MemoryOS">
-      <img src="https://img.shields.io/pypi/pyversions/MemoryOS.svg" alt="Supported Python versions">
-    </a>
-    <a href="https://pypi.org/project/MemoryOS">
-      <img src="https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey" alt="Supported Platforms">
-    </a>
-    <a href="https://memos-docs.openmem.net/home/overview/">
-      <img src="https://img.shields.io/badge/Documentation-view-blue.svg" alt="Documentation">
-    </a>
-    <a href="https://arxiv.org/abs/2507.03724">
-      <img src="https://img.shields.io/badge/arXiv-2507.03724-b31b1b.svg" alt="ArXiv Paper">
-    </a>
-    <a href="https://github.com/MemTensor/MemOS/discussions">
-      <img src="https://img.shields.io/badge/GitHub-Discussions-181717.svg?logo=github" alt="GitHub Discussions">
-    </a>
-    <a href="https://discord.gg/Txbx3gebZR">
-      <img src="https://img.shields.io/badge/Discord-join%20chat-7289DA.svg?logo=discord" alt="Discord">
-    </a>
-    <a href="https://statics.memtensor.com.cn/memos/qr-code.png">
-      <img src="https://img.shields.io/badge/WeChat-Group-07C160.svg?logo=wechat" alt="WeChat Group">
-    </a>
-    <a href="https://opensource.org/license/apache-2-0/">
-      <img src="https://img.shields.io/badge/License-Apache_2.0-green.svg?logo=apache" alt="License">
-    </a>
-    <a href="https://github.com/IAAR-Shanghai/Awesome-AI-Memory">
-      <img alt="Awesome AI Memory" src="https://img.shields.io/badge/Resources-Awesome--AI--Memory-8A2BE2">
-    </a>
-  </p>
+**A memory system for AI agents that lives entirely on your filesystem.**
 
-<p align="center">
-  <strong>🎯 +43.70% Accuracy vs. OpenAI Memory</strong><br/>
-  <strong>🏆 Top-tier long-term memory + personalization</strong><br/>
-  <strong>💰 Saves 35.24% memory tokens</strong><br/>
-  <sub>LoCoMo 75.80 • LongMemEval +40.43% • PrefEval-10 +2568% • PersonaMem +40.75%</sub>
-  <!-- <a href="https://memos.openmem.net/">
-    <img src="https://statics.memtensor.com.cn/memos/github_api_free_banner.gif" alt="MemOS Free API Banner">
-  </a> -->
+Every memory is a plain `.md` file. Edges are Markdown links. The tree is a directory tree. Nothing is hidden in a database.
 
-</p>
+[![Python](https://img.shields.io/badge/Python-3.10%2B-blue)](https://www.python.org/)
+[![Built on MemOS](https://img.shields.io/badge/Built%20on-MemOS-purple)](https://github.com/MemTensor/MemOS)
+[![License](https://img.shields.io/badge/License-Apache_2.0-green.svg)](./LICENSE)
+[![Tests](https://img.shields.io/badge/Tests-149%20passing-brightgreen)](#testing)
 
 </div>
 
-<!-- Get Free API: [Try API](https://memos-dashboard.openmem.net/quickstart/?source=github) -->
+---
 
-<!-- --- -->
+## What is this
 
-<!-- <br> -->
+AyanamiMem is a new memory backend built on top of [MemOS](https://github.com/MemTensor/MemOS). It replaces databases, vector stores, and graph engines with a single principle:
 
-## 🦞 Enhanced OpenClaw with MemOS Plugin
+**The filesystem is the memory.**
 
-![](https://cdn.memtensor.com.cn/img/1770612303123_mnaisk_compressed.png)
+Conversations become Markdown files. Related memories are linked with `[label](./relative/path.md)`. A background compactor groups and summarises them into a RAPTOR-style hierarchy. An agent navigates it with its existing `read_file` tool — no custom tools, no new protocols.
 
-🦞 Your lobster now has a working memory system — choose **Cloud** or **Local** to get started.
+The result is a memory that you can open in Obsidian, commit to git, diff, revert, edit by hand, and share across sessions by copying a folder.
 
-### ☁️ Cloud Plugin — Hosted Memory Service
+---
 
-- [**72% lower token usage**](https://x.com/MemOS_dev/status/2020854044583924111) — intelligent memory retrieval instead of loading full chat history
-- [**Multi-agent memory sharing**](https://x.com/MemOS_dev/status/2020538135487062094) — multi-instance agents share memory via same user_id, automatic context handoff
+## The core idea
 
-Get your API key: [MemOS Dashboard](https://memos-dashboard.openmem.net/cn/login/)  
-Full tutorial → [MemOS-Cloud-OpenClaw-Plugin](https://github.com/MemTensor/MemOS-Cloud-OpenClaw-Plugin)
+```
+Conversation arrives
+    │
+    ▼  chunker
+_fresh/001-i-love-python.md          ← raw verbatim chunk, depth=0
+_fresh/002-planning-trip-to-japan.md
+...
 
-### 🧠 Local Plugin — 100% On-Device Memory
+    │  (async, background)
+    ▼  compactor
+04-japan-trip-planning/              ← LLM-summarised topic, depth=2
+  _summary.md                        ← "Japan trip: Kyoto, onsen, 3000 USD"
+  01-japan-planning-details/         ← depth-1 subtopic
+    _summary.md
+    001-i-m-planning-a-trip.md       ← original leaf, untouched
+    002-budget-is-3000-usd.md
+  02-kyoto-temples/
+    _summary.md
+    003-temples-recommendation.md
 
-- **Zero cloud dependency** — all data stays on your machine, persistent local SQLite storage
-- **Hybrid search + task & skill evolution** — FTS5 + vector search, auto task summarization, reusable skills that self-upgrade
-- **Multi-agent collaboration + Memory Viewer** — memory isolation, skill sharing, full web dashboard with 7 management pages
+    │  (on every agent query)
+    ▼  assembler
+Top-down tree walk:
+  1. Embed query locally (sentence-transformers, no API)
+  2. Compare against _embeddings.json at each directory level
+  3. Descend into best-matching branch
+  4. Select non-overlapping nodes at the right depth
+  5. Return .md file contents with Markdown links intact
 
- 🌐 [Homepage](https://memos-claw.openmem.net) · 
-📖 [Documentation](https://memos-claw.openmem.net/docs/index.html) · 📦 [NPM](https://www.npmjs.com/package/@memtensor/memos-local-openclaw-plugin)
+    │
+    ▼  LLM context
+## Relevant memories
 
-## 📌 MemOS: Memory Operating System for AI Agents
+[Japan trip: Kyoto, onsen, 3000 USD]
+...budget around 3000 USD. Interested in Kyoto
+temples, onsen, and local restaurants.
 
-**MemOS** is a Memory Operating System for LLMs and AI agents that unifies **store / retrieve / manage** for long-term memory, enabling **context-aware and personalized** interactions with **KB**, **multi-modal**, **tool memory**, and **enterprise-grade** optimizations built in.
+## Children
+- [Planning details](./01-japan-planning-details/_summary.md)
+- [Kyoto temples](./02-kyoto-temples/_summary.md)
+```
 
+The LLM sees the summary and its child links. If it needs more detail, it calls `read_file("./01-japan-planning-details/_summary.md")`. No custom tools. Progressive drill-down, bounded by depth.
 
+---
 
-### Key Features
+## What exists today
 
-- **Unified Memory API**: A single API to add, retrieve, edit, and delete memory—structured as a graph, inspectable and editable by design, not a black-box embedding store.
-- **Multi-Modal Memory**: Natively supports text, images, tool traces, and personas, retrieved and reasoned together in one memory system.
-- **Multi-Cube Knowledge Base Management**: Manage multiple knowledge bases as composable memory cubes, enabling isolation, controlled sharing, and dynamic composition across users, projects, and agents.
-- **Asynchronous Ingestion via MemScheduler**: Run memory operations asynchronously with millisecond-level latency for production stability under high concurrency.
-- **Memory Feedback & Correction**: Refine memory with natural-language feedback—correcting, supplementing, or replacing existing memories over time.
+### Three memory backends (all registered in MemOS factory)
 
+| Backend key | Class | What it does |
+|---|---|---|
+| `markdown_text` | `MarkdownTextMemory` | Flat `.md` files. One per memory. Edges encoded as `- TYPE: uuid`. Local cosine search on `key` field. |
+| `markdown_tree_text` | `MarkdownTreeTextMemory` | Adds parent/child edges, tree-walking helpers, auto `_index.md` TOC. |
+| `hierarchical_markdown` | `HierarchicalMarkdownMemory` | Full RAPTOR-style hierarchy. Filesystem = tree. Async compaction. Relative-path Markdown links. |
 
-### News
+### The hierarchical backend in detail
 
-- **2026-03-08** · 🦞 **MemOS OpenClaw Plugin — Cloud & Local**  
-  Official OpenClaw memory plugins launched. **Cloud Plugin**: hosted memory service with 72% lower token usage and multi-agent memory sharing ([MemOS-Cloud-OpenClaw-Plugin](https://github.com/MemTensor/MemOS-Cloud-OpenClaw-Plugin)). **Local Plugin** (`v1.0.0`): 100% on-device memory with persistent SQLite, hybrid search (FTS5 + vector), task summarization & skill evolution, multi-agent collaboration, and a full Memory Viewer dashboard.
+The main backend lives at `src/memos/memories/textual/hierarchical_markdown_memory.py` and is composed of seven focused components:
 
-- **2025-12-24** · 🎉 **MemOS v2.0: Stardust (星尘) Release**  
-  Comprehensive KB (doc/URL parsing + cross-project sharing), memory feedback & precise deletion, multi-modal memory (images/charts), tool memory for agent planning, Redis Streams scheduling + DB optimizations, streaming/non-streaming chat, MCP upgrade, and lightweight quick/full deployment.
-  <details>
-    <summary>✨ <b>New Features</b></summary>
+```
+src/memos/memories/textual/hierarchical_markdown/
+├── fs.py           # read/write .md, slugify, sequence numbering, edge parsing
+├── embeddings.py   # _embeddings.json: file-locked atomic writes, concurrent-safe
+├── chunker.py      # conversation messages → leaf .md files in _fresh/
+├── summarizer.py   # depth-aware LLM summarisation, 3-level escalation
+├── compactor.py    # cluster leaves by embedding sim, mkdir, move, summarise, cascade
+├── assembler.py    # top-down tree walk, non-overlapping node selection
+└── updater.py      # mark stale upward, re-summarise bottom-up
+```
 
-  **Knowledge Base & Memory**
-  - Added knowledge base support for long-term memory from documents and URLs
+### The OpenClaw plugin
 
-  **Feedback & Memory Management**
-  - Added natural language feedback and correction for memories
-  - Added memory deletion API by memory ID
-  - Added MCP support for memory deletion and feedback
+`apps/memos-markdown-openclaw/` is a lifecycle plugin for [OpenClaw](https://openclaw.ai) that wires AyanamiMem into every agent conversation automatically:
 
-  **Conversation & Retrieval**
-  - Added chat API with memory-aware retrieval
-  - Added memory filtering with custom tags (Cloud & Open Source)
+- **`before_agent_start`** → searches memory by local embeddings, injects context
+- **`agent_end`** → chunks conversation into leaf files, triggers compaction
+- No new tools exposed to the LLM. It reads child files via `read_file` following the Markdown links already in the context.
 
-  **Multimodal & Tool Memory**
-  - Added tool memory for tool usage history
-  - Added image memory support for conversations and documents
+---
 
-  </details>
+## File format
 
-  <details>
-    <summary>📈 <b>Improvements</b></summary>
+Every `.md` file has the same three-part structure:
 
-  **Data & Infrastructure**
-  - Upgraded database for better stability and performance
+```markdown
+---
+key: "Japan trip: Kyoto temples, onsen, 3000 USD budget"
+depth: 2
+node_kind: condensed
+descendant_count: 5
+earliest_at: "2026-03-20T10:00:00"
+latest_at: "2026-03-23T15:12:00"
+stale: false
+token_count: 180
+session_id: "session-abc"
+tags: [travel, japan, kyoto]
+---
 
-  **Scheduler**
-  - Rebuilt task scheduler with Redis Streams and queue isolation
-  - Added task priority, auto-recovery, and quota-based scheduling
+User is planning a trip to Japan next month. Budget around 3000 USD.
+Interested in Kyoto temples (Fushimi Inari, Kinkaku-ji), onsen experience,
+and local food including ramen and conveyor belt sushi.
 
-  **Deployment & Engineering**
-  - Added lightweight deployment with quick and full modes
+## Children
+- [Planning details](./01-japan-planning-details/_summary.md)
+- [Kyoto temples](./02-kyoto-temples/_summary.md)
 
-  </details>
+## Related
+- [Work ML project](../02-work-project/_summary.md)
+```
 
-  <details>
-    <summary>🐞 <b>Bug Fixes</b></summary>
+- **YAML frontmatter** → all metadata fields (depth, kind, dates, tags)
+- **Body** → the memory content, verbatim for leaves, LLM-generated for summaries
+- **`## Children`** → links to subdirectories (the tree structure)
+- **`## Related`** → semantic cross-links to other subtrees
 
-  **Memory Scheduling & Updates**
-  - Fixed legacy scheduling API to ensure correct memory isolation
-  - Fixed memory update logging to show new memories correctly
+Edges are plain Markdown relative links. `cat`, Obsidian, VS Code, GitHub — all render them correctly.
 
-  </details>
+---
 
-- **2025-08-07** · 🎉 **MemOS v1.0.0 (MemCube) Release**
-  First MemCube release with a word-game demo, LongMemEval evaluation, BochaAISearchRetriever integration, NebulaGraph support, improved search capabilities, and the official Playground launch.
+## How search works
 
-  <details>
-    <summary>✨ <b>New Features</b></summary>
+No API call during search. Everything is local.
 
-  **Playground**
-  - Expanded Playground features and algorithm performance.
+```python
+# 1. Embed the query locally
+query_vec = embedder.embed(["cherry blossom season Japan"])[0]
 
-  **MemCube Construction**
-  - Added a text game demo based on the MemCube novel.
+# 2. At root: read _embeddings.json (pre-computed keys), cosine similarity
+# "Japan trip: Kyoto temples, onsen, 3000 USD" → 0.71
+# "ML classifier for customer support" → 0.09
+# → descend into japan-trip/
 
-  **Extended Evaluation Set**
-  - Added LongMemEval evaluation results and scripts.
+# 3. At japan-trip/_embeddings.json: compare subtopics
+# "Planning details" → 0.68
+# "Kyoto temples" → 0.74
+# → descend into kyoto-temples/
 
-  </details>
+# 4. Token budget reached → return kyoto-temples/_summary.md
 
-  <details>
-    <summary>📈 <b>Improvements</b></summary>
+# 5. Non-overlapping: if kyoto-temples/_summary.md selected,
+#    its parent (japan-trip/_summary.md) and its children are excluded
+```
 
-  **Plaintext Memory**
-  - Integrated internet search with Bocha.
-  - Added support for Nebula database.
-  - Added contextual understanding for the tree-structured plaintext memory search interface.
+The returned node is the most specific summary that fits the token budget. The LLM can read deeper via `read_file` on the child links it sees in the body.
 
-  </details>
+---
 
-  <details>
-    <summary>🐞 <b>Bug Fixes</b></summary>
+## How compaction works
 
-  **KV Cache Concatenation**
-  - Fixed the concat_cache method.
+The compactor runs asynchronously after new leaves are added. It builds the tree bottom-up:
 
-  **Plaintext Memory**
-  - Fixed Nebula search-related issues.
+**Leaf pass** — triggered when `_fresh/` accumulates enough non-tail leaves:
+1. Read `_embeddings.json` for all leaves in `_fresh/`
+2. Agglomerative clustering by cosine similarity
+3. For each cluster: LLM summarises → creates `NN-slug/` directory → moves leaf files in → writes `_summary.md`
+4. Updates parent `_embeddings.json`
 
-  </details>
+**Condensation pass** — triggered when enough depth-1 dirs exist at the same level:
+1. Find all dirs at target depth in `memory_dir`
+2. Cluster by their summary embeddings
+3. For each cluster: LLM summarises the summaries → creates new parent dir → moves subdirs in → writes parent `_summary.md`
+4. Cascade upward until no more condensation possible
 
-- **2025-07-07** · 🎉 **MemOS v1.0: Stellar (星河) Preview Release**
-  A SOTA Memory OS for LLMs is now open-sourced.
-- **2025-07-04** · 🎉 **MemOS Paper Release**
-  [MemOS: A Memory OS for AI System](https://arxiv.org/abs/2507.03724) is available on arXiv.
-- **2024-07-04** · 🎉 **Memory3 Model Release at WAIC 2024**
-  The Memory3 model, featuring a memory-layered architecture, was unveiled at the 2024 World Artificial Intelligence Conference.
+**Stale propagation** — when a leaf is updated:
+1. Walk upward, mark each ancestor `stale: true`
+2. Background re-summarisation processes stale nodes deepest-first
 
-<br>
+---
 
-## 🚀 Quickstart Guide
+## How it persists across sessions
 
-### ☁️ 1、Cloud API (Hosted)
-#### Get API Key
-- Sign up on the [MemOS dashboard](https://memos-dashboard.openmem.net/cn/quickstart/?source=landing)
-- Go to **API Keys** and copy your key
+Files are written to disk immediately on every mutation. A new session just calls `mem.load(memory_dir)`:
 
-#### Next Steps
-- [MemOS Cloud Getting Started](https://memos-docs.openmem.net/memos_cloud/quick_start/)
-  Connect to MemOS Cloud and enable memory in minutes.
-- [MemOS Cloud Platform](https://memos.openmem.net/?from=/quickstart/)
-  Explore the Cloud dashboard, features, and workflows.
+```python
+# Session 1
+mem = HierarchicalMarkdownMemory(config)
+items = mem.extract(messages)   # writes to _fresh/*.md
+mem.add(items)
+mem.compact()                   # builds directory tree
 
-### 🖥️ 2、Self-Hosted (Local/Private)
-1. Get the repository.
-    ```bash
-    git clone https://github.com/MemTensor/MemOS.git
-    cd MemOS
-    pip install -r ./docker/requirements.txt
-    ```
-2. Configure `docker/.env.example` and copy to `MemOS/.env`
- - The `OPENAI_API_KEY`,`MOS_EMBEDDER_API_KEY`,`MEMRADER_API_KEY` and others can be applied for through [`BaiLian`](https://bailian.console.aliyun.com/?spm=a2c4g.11186623.0.0.2f2165b08fRk4l&tab=api#/api).
- - Fill in the corresponding configuration in the `MemOS/.env` file.
-3. Start the service.
+# Session 2 — new process, same directory
+mem2 = HierarchicalMarkdownMemory(config)
+mem2.load(memory_dir)           # scans all .md files, rebuilds cache
+results = mem2.search("Japan")  # works immediately
+```
 
-- Launch via Docker
-  ###### Tips: Please ensure that Docker Compose is installed successfully and that you have navigated to the docker directory (via `cd docker`) before executing the following command.
-  ```bash
-  # Enter docker directory
-  docker compose up
-  ```
-  ##### For detailed steps, see the[`Docker Reference`](https://docs.openmem.net/open_source/getting_started/rest_api_server/#method-1-docker-use-repository-dependency-package-imagestart-recommended-use).
+The directory itself is the persistent state. Git tracks every change.
 
-- Launch via the uvicorn command line interface (CLI)
-  ###### Tips: Please ensure that Neo4j and Qdrant are running before executing the following command.
-  ```bash
-  cd src
-  uvicorn memos.api.server_api:app --host 0.0.0.0 --port 8001 --workers 1
-  ```
-  ##### For detailed integration steps, see the [`CLI Reference`](https://docs.openmem.net/open_source/getting_started/rest_api_server/#method-3client-install-with-CLI).
+---
 
+## How git tracking works
 
+Every mutation is a file system change, so every mutation is git-trackable:
 
-### Basic Usage (Self-Hosted)
-  - Add User Message
-    ```python
-    import requests
-    import json
+```
+memory: add 3 leaves from conversation       _fresh/001-*.md, 002-*.md, 003-*.md
+memory: compact 8 leaves into japan-trip/    ← mkdir + rename + new _summary.md
+memory: update leaf 001-*.md                 ← diff shows changed body
+memory: re-summarise _summary.md (stale)     ← diff shows updated summary
+memory: share japan-trip/ with session-def   ← symlink added
+```
 
-    data = {
-        "user_id": "8736b16e-1d20-4163-980b-a5063c3facdc",
-        "mem_cube_id": "b32d0977-435d-4828-a86f-4f47f8b55bca",
-        "messages": [
-            {
-                "role": "user",
-                "content": "I like strawberry"
-            }
-        ],
-        "async_mode": "sync"
+With `git_auto_commit: true` in config, commits are created automatically. Without it, you run `git commit` manually when you want a checkpoint.
+
+---
+
+## Quick start
+
+### Install
+
+```bash
+git clone https://github.com/MemTensor/MemOS
+cd MemOS
+uv venv && uv pip install -e ".[all]"
+uv pip install sentence-transformers pyyaml
+```
+
+### Run the demo
+
+```bash
+export OPENAI_API_KEY=your_key
+export OPENAI_BASE_URL=https://openrouter.ai/api/v1   # or any OpenAI-compatible endpoint
+export MOS_CHAT_MODEL=deepseek/deepseek-chat           # or any chat model
+
+# Simple demo: 3 conversations, flat _fresh/ + manual compact
+.venv/bin/python examples/hierarchical_e2e_test.py
+
+# Deep tree demo: 12 conversations, forced multi-level compaction
+.venv/bin/python examples/deep_tree_e2e_test.py
+```
+
+### Use in Python
+
+```python
+from memos.configs.memory import HierarchicalMarkdownMemoryConfig
+from memos.memories.textual.hierarchical_markdown_memory import HierarchicalMarkdownMemory
+
+config = HierarchicalMarkdownMemoryConfig(
+    memory_dir=".memos/my_agent",
+    extractor_llm={
+        "backend": "openai",
+        "config": {
+            "model_name_or_path": "deepseek/deepseek-chat",
+            "api_key": "your_key",
+            "api_base": "https://openrouter.ai/api/v1",
+        },
+    },
+    embedder={
+        "backend": "sentence_transformer",
+        "config": {"model_name_or_path": "sentence-transformers/all-MiniLM-L6-v2"},
+    },
+    fresh_tail_count=32,       # keep 32 most recent leaves always available
+    condensed_min_fanout=4,    # group 4+ dirs into a parent
+    leaf_chunk_tokens=2048,    # max tokens per leaf
+)
+
+mem = HierarchicalMarkdownMemory(config)
+
+# Load previous sessions
+mem.load(".memos/my_agent")
+
+# Extract memories from a conversation
+items = mem.extract([
+    {"role": "user", "content": "I'm planning a trip to Japan..."},
+    {"role": "assistant", "content": "Kyoto is wonderful!"},
+])
+mem.add(items)               # writes .md files immediately
+mem.compact()                # trigger compaction (also runs async after add)
+
+# Search (local embeddings, no API call)
+results = mem.search("Japan travel plans", top_k=5)
+for r in results:
+    print(r.metadata.key, "→", r.memory[:80])
+
+# Show the tree
+print(mem.get_tree_index())
+```
+
+### Use the interactive chat loop
+
+```bash
+.venv/bin/python examples/markdown_memory_chat.py
+```
+
+This is a proactive memory-augmented chat loop. On every turn it automatically:
+- Searches memory (local, no API)
+- Injects context into the system prompt
+- After the reply: extracts and stores new memories
+
+Special commands: `/memories`, `/tree`, `/save`, `/quit`
+
+---
+
+## OpenClaw plugin
+
+### Install
+
+```bash
+cd apps/memos-markdown-openclaw
+openclaw plugins install .
+```
+
+### Configure (`~/.openclaw/openclaw.json`)
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "memos-markdown-openclaw-plugin": {
+        "enabled": true
+      }
     }
-    headers = {
-        "Content-Type": "application/json"
-    }
-    url = "http://localhost:8000/product/add"
-
-    res = requests.post(url=url, headers=headers, data=json.dumps(data))
-    print(f"result: {res.json()}")
-    ```
-  - Search User Memory
-    ```python
-    import requests
-    import json
-
-    data = {
-        "query": "What do I like",
-        "user_id": "8736b16e-1d20-4163-980b-a5063c3facdc",
-        "mem_cube_id": "b32d0977-435d-4828-a86f-4f47f8b55bca"
-    }
-    headers = {
-        "Content-Type": "application/json"
-    }
-    url = "http://localhost:8000/product/search"
-
-    res = requests.post(url=url, headers=headers, data=json.dumps(data))
-    print(f"result: {res.json()}")
-    ```
-
-<br>
-
-## 📚 Resources
-
-- **Awesome-AI-Memory**
- This is a curated repository dedicated to resources on memory and memory systems for large language models. It systematically collects relevant research papers, frameworks, tools, and practical insights. The repository aims to organize and present the rapidly evolving research landscape of LLM memory, bridging multiple research directions including natural language processing, information retrieval, agentic systems, and cognitive science.
-- **Get started** 👉 [IAAR-Shanghai/Awesome-AI-Memory](https://github.com/IAAR-Shanghai/Awesome-AI-Memory)
-- **MemOS Cloud OpenClaw Plugin**
-  Official OpenClaw lifecycle plugin for MemOS Cloud. It automatically recalls context from MemOS before the agent starts and saves the conversation back to MemOS after the agent finishes.
-- **Get started** 👉 [MemTensor/MemOS-Cloud-OpenClaw-Plugin](https://github.com/MemTensor/MemOS-Cloud-OpenClaw-Plugin)
-
-<br>
-
-## 💬 Community & Support
-
-Join our community to ask questions, share your projects, and connect with other developers.
-
-- **GitHub Issues**: Report bugs or request features in our <a href="https://github.com/MemTensor/MemOS/issues" target="_blank">GitHub Issues</a>.
-- **GitHub Pull Requests**: Contribute code improvements via <a href="https://github.com/MemTensor/MemOS/pulls" target="_blank">Pull Requests</a>.
-- **GitHub Discussions**: Participate in our <a href="https://github.com/MemTensor/MemOS/discussions" target="_blank">GitHub Discussions</a> to ask questions or share ideas.
-- **Discord**: Join our <a href="https://discord.gg/Txbx3gebZR" target="_blank">Discord Server</a>.
-- **WeChat**: Scan the QR code to join our WeChat group.
-
-<div align="center">
-  <img src="https://statics.memtensor.com.cn/memos/qr-code.png" alt="QR Code" width="300" />
-</div>
-
-<br>
-
-## 📜 Citation
-
-> [!NOTE]
-> We publicly released the Short Version on **May 28, 2025**, making it the earliest work to propose the concept of a Memory Operating System for LLMs.
-
-If you use MemOS in your research, we would appreciate citations to our papers.
-
-```bibtex
-
-@article{li2025memos_long,
-  title={MemOS: A Memory OS for AI System},
-  author={Li, Zhiyu and Song, Shichao and Xi, Chenyang and Wang, Hanyu and Tang, Chen and Niu, Simin and Chen, Ding and Yang, Jiawei and Li, Chunyu and Yu, Qingchen and Zhao, Jihao and Wang, Yezhaohui and Liu, Peng and Lin, Zehao and Wang, Pengyuan and Huo, Jiahao and Chen, Tianyi and Chen, Kai and Li, Kehang and Tao, Zhen and Ren, Junpeng and Lai, Huayi and Wu, Hao and Tang, Bo and Wang, Zhenren and Fan, Zhaoxin and Zhang, Ningyu and Zhang, Linfeng and Yan, Junchi and Yang, Mingchuan and Xu, Tong and Xu, Wei and Chen, Huajun and Wang, Haofeng and Yang, Hongkang and Zhang, Wentao and Xu, Zhi-Qin John and Chen, Siheng and Xiong, Feiyu},
-  journal={arXiv preprint arXiv:2507.03724},
-  year={2025},
-  url={https://arxiv.org/abs/2507.03724}
-}
-
-@article{li2025memos_short,
-  title={MemOS: An Operating System for Memory-Augmented Generation (MAG) in Large Language Models},
-  author={Li, Zhiyu and Song, Shichao and Wang, Hanyu and Niu, Simin and Chen, Ding and Yang, Jiawei and Xi, Chenyang and Lai, Huayi and Zhao, Jihao and Wang, Yezhaohui and others},
-  journal={arXiv preprint arXiv:2505.22101},
-  year={2025},
-  url={https://arxiv.org/abs/2505.22101}
-}
-
-@article{yang2024memory3,
-author = {Yang, Hongkang and Zehao, Lin and Wenjin, Wang and Wu, Hao and Zhiyu, Li and Tang, Bo and Wenqiang, Wei and Wang, Jinbo and Zeyun, Tang and Song, Shichao and Xi, Chenyang and Yu, Yu and Kai, Chen and Xiong, Feiyu and Tang, Linpeng and Weinan, E},
-title = {Memory$^3$: Language Modeling with Explicit Memory},
-journal = {Journal of Machine Learning},
-year = {2024},
-volume = {3},
-number = {3},
-pages = {300--346},
-issn = {2790-2048},
-doi = {https://doi.org/10.4208/jml.240708},
-url = {https://global-sci.com/article/91443/memory3-language-modeling-with-explicit-memory}
+  }
 }
 ```
 
-<br>
+Set environment variables:
+```bash
+export OPENAI_API_KEY=your_key
+export OPENAI_BASE_URL=https://openrouter.ai/api/v1
+export MOS_CHAT_MODEL=deepseek/deepseek-chat
+export MEMORY_DIR=~/.openclaw/ayanami-mem       # where .md files live
+```
 
-## 🙌 Contributing
+Restart the gateway: `openclaw gateway restart`
 
-We welcome contributions from the community! Please read our [contribution guidelines](https://memos-docs.openmem.net/open_source/contribution/overview/) to get started.
+### What happens automatically
 
-<br>
+| OpenClaw event | What AyanamiMem does | API call? |
+|---|---|---|
+| Plugin starts | Spawns `bridge.py`, loads `.md` tree from disk | No |
+| User sends message | Top-down tree walk → inject context into system prompt | No (local) |
+| Agent replies | Chunks conversation → `_fresh/*.md` → triggers compaction | Yes (LLM, 1 call) |
+| Compaction | Groups similar leaves → builds `_summary.md` hierarchy | Yes (LLM, per cluster) |
+| LLM needs detail | Reads child `.md` via existing `read_file` tool | No |
 
-## 📄 License
+---
 
-MemOS is licensed under the [Apache 2.0 License](./LICENSE).
+## Testing
+
+### Unit + integration tests (no API required)
+
+```bash
+.venv/bin/python -m pytest tests/memories/textual/ -v
+# 149 tests, all passing
+```
+
+Breakdown:
+- `test_hm_fs.py` — 28 tests: file I/O primitives, slugify, sequencing
+- `test_hm_embeddings.py` — 15 tests: atomic writes, concurrent read/write, versioning
+- `test_hm_chunker.py` — 9 tests: chunking, token limits, metadata
+- `test_hm_summarizer.py` — 9 tests: LLM escalation, fallback, update mode
+- `test_hm_e2e.py` — 18 tests: full CRUD, search, extract+add, cross-session reload
+- `test_markdown.py` — 31 tests: flat markdown backend
+- `test_markdown_tree.py` — 20 tests: tree ops, traversal, move, delete-reparent
+- `test_markdown_cross_session.py` — 19 tests: cross-session persistence, concurrent writes
+
+### Live E2E tests (requires API key)
+
+```bash
+# Simple: 3 conversations, 1 compaction cycle
+.venv/bin/python examples/hierarchical_e2e_test.py
+
+# Deep: 12 conversations across 3 topics, forces multi-level tree
+.venv/bin/python examples/deep_tree_e2e_test.py
+```
+
+The deep test produces a 3-level tree with real LLM-generated summaries:
+```
+depth-2: "Japan cherry blossom trip planning"
+  depth-1: "Japan trip planning for cherry blossom season" (4 leaves)
+  depth-1: "Planning a 2-week trip to Japan"
+
+depth-2: "AWS model deployment strategies"
+  depth-1: "Model deployment on AWS" (1 leaf)
+  depth-1: "AWS Model Deployment Advice"
+
+depth-2: "Kitchen remodel cost breakdown"
+  depth-1: "kitchen remodel cost inquiry" (1 leaf)
+  depth-1: "kitchen remodel cost inquiry"
+```
+
+---
+
+## Architecture
+
+```
+OpenClaw Gateway
+    │
+    ├─ before_agent_start  →  POST /search  →  top-down tree walk
+    │                                          local cosine similarity
+    │                                          returns .md content with links
+    │
+    ├─ Agent generates (system prompt includes memory context + child links)
+    │  LLM can call read_file("./child/_summary.md") to drill deeper
+    │
+    └─ agent_end  →  POST /extract  →  chunker  →  _fresh/*.md
+                                       compactor (async)  →  directory tree
+
+apps/memos-markdown-openclaw/
+├── bridge.py      # Python HTTP server (stdlib only)
+└── index.mjs      # OpenClaw JS plugin (ES module, no npm deps)
+
+src/memos/memories/textual/
+├── hierarchical_markdown/
+│   ├── fs.py          # filesystem I/O
+│   ├── embeddings.py  # _embeddings.json (async-safe)
+│   ├── chunker.py     # messages → _fresh/*.md
+│   ├── summarizer.py  # LLM summarisation
+│   ├── compactor.py   # tree construction
+│   ├── assembler.py   # search / context assembly
+│   └── updater.py     # stale propagation
+├── hierarchical_markdown_memory.py  # main class (BaseTextMemory)
+├── markdown.py                      # flat markdown backend
+└── markdown_tree.py                 # simple tree backend
+```
+
+---
+
+## Design decisions and tradeoffs
+
+**Why Markdown files instead of a database?**
+
+A database is opaque. You can't open it in a text editor, commit individual records to git, or share a single memory by copying a file. The filesystem gives you all of those for free. The cost is that you can't do relational queries — but we don't need them. We need cosine similarity on keys, which is a numpy operation on an in-memory array.
+
+**Why relative-path links instead of UUIDs?**
+
+UUIDs require a lookup table to resolve. Relative paths are self-describing — the LLM can see `[Planning details](./01-planning/_summary.md)` and know exactly what to read. It works in any Markdown renderer. No custom tool needed.
+
+**Why search on keys only, not full content?**
+
+Keys are short (5–15 words), descriptive, and generated by the LLM during summarisation. They are purpose-built for retrieval. Full-content embedding is noisier and slower. The key is like a human-assigned index term — exact matches and near-misses are more meaningful.
+
+**Why async compaction?**
+
+Compaction is slow (it calls the LLM). Blocking the user on every message would add 2–5 seconds of latency. Instead, leaves accumulate in `_fresh/` and compaction runs in a background thread. The fresh tail (configurable, default 32 leaves) is always included verbatim in context, so recent conversations are always available even before compaction.
+
+**Why is stale propagation bottom-up?**
+
+If you update a leaf, its parent summary is now wrong. And its grandparent summary is wrong. Bottom-up means we re-summarise the leaf's parent first (from updated children), then the grandparent (from the updated parent), and so on. Top-down would give us stale children summarised into fresh parents.
+
+---
+
+## What's next (from PLAN.md)
+
+The implementation plan has three features, of which Feature 1 is complete:
+
+| Feature | Status | Description |
+|---|---|---|
+| **Hierarchical Tree Text Memory** | ✅ Done | RAPTOR-style summary tree as filesystem |
+| **Session-Level Memory Isolation** | 🔲 Planned | One dir per session, `_sessions.json` grant model |
+| **Cross-Session Subtree Sharing** | 🔲 Planned | Symlink-based sharing, git-trackable grants |
+
+Session isolation and subtree sharing are designed but not yet implemented. See [PLAN.md](./PLAN.md) for the full specification.
+
+---
+
+## Relationship to MemOS
+
+AyanamiMem is a fork/extension of [MemOS](https://github.com/MemTensor/MemOS). It:
+
+- **Keeps** the full MemOS API (`BaseTextMemory`, `MemoryFactory`, configs, LLM/embedder factories)
+- **Adds** three new backends (`markdown_text`, `markdown_tree_text`, `hierarchical_markdown`)
+- **Does not change** any existing MemOS backends (`tree_text`, `general_text`, `naive_text`, etc.)
+- **Replaces** the OpenClaw plugin's storage backend with the hierarchical markdown memory
+
+All 149 new tests pass alongside the existing MemOS test suite. The existing MemOS functionality is unaffected.
+
+---
+
+## License
+
+Apache 2.0 — same as MemOS.

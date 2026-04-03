@@ -214,6 +214,22 @@ class HierarchicalMarkdownMemoryConfig(BaseTextMemoryConfig):
         description="Minimum children before a condensed node is created.",
     )
 
+    compact_threshold: int = Field(
+        default=4,
+        description=(
+            "Minimum number of non-tail leaves in _fresh/ required before "
+            "compaction triggers.  Non-tail = total leaves minus fresh_tail_count."
+        ),
+    )
+
+    compact_similarity_threshold: float = Field(
+        default=0.3,
+        description=(
+            "Cosine-similarity threshold for agglomerative leaf clustering. "
+            "Lower values group more leaves together.  Range 0.0–1.0."
+        ),
+    )
+
     context_threshold: float = Field(
         default=0.75,
         description="Fraction of leaf_chunk_tokens that triggers compaction.",

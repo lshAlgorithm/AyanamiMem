@@ -17,7 +17,7 @@ from typing import Any
 import numpy as np
 
 from memos.log import get_logger
-from memos.memories.textual.hierarchical_markdown.embeddings import EmbeddingIndex
+from memos.memories.textual.hierarchical_markdown.embeddings import EmbeddingCache
 from memos.memories.textual.hierarchical_markdown.fs import (
     FRESH_DIR,
     SUMMARY_FILENAME,
@@ -48,7 +48,7 @@ def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
 
 def _agglomerative_cluster(
     keys: list[str],
-    embeddings: dict[str, list[float]],
+    embeddings: dict[str, list[float] | np.ndarray],
     threshold: float = 0.5,
 ) -> list[list[str]]:
     """Simple agglomerative clustering using cosine similarity.
@@ -134,6 +134,7 @@ class Compactor:
         fresh_tail_count: int = 4,
         condensed_min_fanout: int = 6,
         similarity_threshold: float = 0.5,
+        emb_cache: EmbeddingCache | None = None,
     ) -> None:
         self.memory_dir = memory_dir
         self.summarizer = summarizer
@@ -142,6 +143,7 @@ class Compactor:
         self.fresh_tail_count = fresh_tail_count
         self.condensed_min_fanout = condensed_min_fanout
         self.similarity_threshold = similarity_threshold
+        self._emb_cache = emb_cache
         self._fresh_dir = os.path.join(memory_dir, FRESH_DIR)
 
     # ── Public API ────────────────────────────────────────────────────────
@@ -166,9 +168,8 @@ class Compactor:
         if not to_compact:
             return 0
 
-        # Read embeddings for clustering
-        fresh_idx = EmbeddingIndex(self._fresh_dir)
-        emb_data = fresh_idx.read()
+        # Read embeddings for clustering from in-memory cache
+        emb_data = self._emb_cache.children_of(self._fresh_dir) if self._emb_cache else {}
 
         # Cluster
         clusters = _agglomerative_cluster(to_compact, emb_data, self.similarity_threshold)
@@ -194,15 +195,17 @@ class Compactor:
             target_dir = os.path.join(self.memory_dir, dirname)
             os.makedirs(target_dir, exist_ok=True)
 
-            # Move leaf files into the new directory, renumbering sequentially
+            # Move leaf files into the new directory
             children_links: list[tuple[str, str]] = []
-            for _i, leaf_name in enumerate(cluster, start=1):
+            for leaf_name in cluster:
                 src = os.path.join(self._fresh_dir, leaf_name)
                 if not os.path.isfile(src):
                     continue
-                # Preserve the original filename inside the new directory
                 dst = os.path.join(target_dir, leaf_name)
                 os.rename(src, dst)
+                # Update in-memory cache: rename old path to new path
+                if self._emb_cache is not None:
+                    self._emb_cache.rename_prefix(src, dst)
                 children_links.append((leaf_name.rsplit(".", 1)[0], f"./{leaf_name}"))
                 moved_keys.append(leaf_name)
                 compacted_count += 1
@@ -222,17 +225,13 @@ class Compactor:
             }
             write_summary(target_dir, summary_body, summary_meta, children_links)
 
-            # Update parent-level embeddings
-            parent_idx = EmbeddingIndex(self.memory_dir)
-            try:
-                summary_vec = self.embedder.embed([key])[0]
-                parent_idx.update({dirname: summary_vec})
-            except Exception:
-                logger.warning("Failed to embed summary key for %s", dirname)
-
-        # Remove moved entries from _fresh/ embeddings
-        if moved_keys:
-            fresh_idx.remove(moved_keys)
+            # Register the new condensed dir in the cache
+            if self._emb_cache is not None:
+                try:
+                    summary_vec = self.embedder.embed([key])[0]
+                    self._emb_cache.update({target_dir: summary_vec})
+                except Exception:
+                    logger.warning("Failed to embed summary key for %s", dirname)
 
         logger.info(
             "Leaf pass compacted %d leaves into %d clusters", compacted_count, len(clusters)
@@ -268,16 +267,16 @@ class Compactor:
         if len(target_dirs) < self.condensed_min_fanout:
             return 0
 
-        # Read summaries and collect embeddings for clustering
-        dir_embeddings: dict[str, list[float]] = {}
         parent_dir = os.path.dirname(target_dirs[0]) if target_dirs else self.memory_dir
-        parent_idx = EmbeddingIndex(parent_dir)
-        emb_data = parent_idx.read()
-
         dir_names = [os.path.basename(d) for d in target_dirs]
-        for dname in dir_names:
-            if dname in emb_data:
-                dir_embeddings[dname] = emb_data[dname]
+
+        # Get embeddings from in-memory cache
+        dir_embeddings: dict[str, np.ndarray] = {}
+        if self._emb_cache is not None:
+            children = self._emb_cache.children_of(parent_dir)
+            for dname in dir_names:
+                if dname in children:
+                    dir_embeddings[dname] = children[dname]
 
         clusters = _agglomerative_cluster(dir_names, dir_embeddings, self.similarity_threshold)
 
@@ -307,7 +306,7 @@ class Compactor:
             new_dir = os.path.join(parent_dir, new_dirname)
             os.makedirs(new_dir, exist_ok=True)
 
-            # Move children into the new parent
+            # Move children into the new parent, updating cache paths
             children_links: list[tuple[str, str]] = []
             moved_dir_names: list[str] = []
             for dname in cluster:
@@ -315,6 +314,8 @@ class Compactor:
                 dst = os.path.join(new_dir, dname)
                 if os.path.isdir(src):
                     os.rename(src, dst)
+                    if self._emb_cache is not None:
+                        self._emb_cache.rename_prefix(src, dst)
                     children_links.append((dname, f"./{dname}/{SUMMARY_FILENAME}"))
                     moved_dir_names.append(dname)
                     condensed_count += 1
@@ -337,29 +338,40 @@ class Compactor:
             }
             write_summary(new_dir, summary_body, summary_meta, children_links)
 
-            # Update parent-level embeddings: add new dir, remove old dirs
-            try:
-                summary_vec = self.embedder.embed([key])[0]
-                parent_idx.update({new_dirname: summary_vec})
-            except Exception:
-                logger.warning("Failed to embed condensed key for %s", new_dirname)
-            parent_idx.remove(moved_dir_names)
+            # Register new parent dir in cache
+            if self._emb_cache is not None:
+                try:
+                    summary_vec = self.embedder.embed([key])[0]
+                    self._emb_cache.update({new_dir: summary_vec})
+                except Exception:
+                    logger.warning("Failed to embed condensed key for %s", new_dirname)
 
         logger.info("Condensation pass at depth %d condensed %d dirs", depth, condensed_count)
         return condensed_count
 
-    def compact_incremental(self) -> None:
+    def compact_incremental(self, force: bool = False) -> dict[str, int]:
         """Run a full incremental compaction cycle.
 
         1. Acquire the lock file to prevent concurrent compaction.
-        2. Run ``leaf_pass`` if ``should_compact`` is ``True``.
-        3. Cascade ``condensation_pass`` upward from depth 1.
+        2. Run ``leaf_pass`` if ``should_compact()`` is ``True`` *or* ``force=True``.
+        3. Cascade ``condensation_pass`` upward through all depths.
         4. Release the lock.
+
+        Args:
+            force: If ``True``, run ``leaf_pass`` even when ``should_compact()``
+                   returns ``False``.  Used by explicit user-triggered compaction
+                   (e.g. the ``/compact`` command) to bypass the auto-compact
+                   threshold while still respecting the lock and full cascade.
+
+        Returns:
+            A dict with ``{"leaves_compacted": N, "dirs_condensed": M}`` so
+            callers can report what happened without peeking at internals.
         """
+        result = {"leaves_compacted": 0, "dirs_condensed": 0}
         lock_path = os.path.join(self._fresh_dir, _LOCK_FILENAME)
         if os.path.exists(lock_path):
             logger.info("Compaction already in progress (lock file exists), skipping")
-            return
+            return result
 
         try:
             # Acquire lock
@@ -367,19 +379,21 @@ class Compactor:
             with open(lock_path, "w") as f:
                 f.write(datetime.now().isoformat())
 
-            # Step 1: Leaf pass
-            if self.should_compact():
+            # Step 1: Leaf pass — honour threshold unless forced
+            if force or self.should_compact():
                 compacted = self.leaf_pass()
+                result["leaves_compacted"] = compacted
                 logger.info("Leaf pass completed: %d leaves compacted", compacted)
             else:
                 logger.debug("Not enough leaves to compact (%s)", self._fresh_dir)
 
-            # Step 2: Cascade condensation upward
+            # Step 2: Cascade condensation upward through all depths
             max_depth = self._max_depth(self.memory_dir, current_depth=0)
             for depth in range(1, max_depth + 1):
                 condensed = self.condensation_pass(depth)
                 if condensed == 0:
                     break  # No more condensation needed at higher depths
+                result["dirs_condensed"] += condensed
                 logger.info("Condensation at depth %d: %d dirs condensed", depth, condensed)
 
         except Exception:
@@ -388,6 +402,8 @@ class Compactor:
             # Release lock
             if os.path.exists(lock_path):
                 os.remove(lock_path)
+
+        return result
 
     # ── Private helpers ───────────────────────────────────────────────────
 

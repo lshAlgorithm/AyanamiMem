@@ -1,127 +1,113 @@
-"""Async-safe embedding index stored as ``_embeddings.json`` per directory.
+"""In-memory embedding cache: absolute path → 384-dim vector.
 
-Each directory in the memory tree contains an ``_embeddings.json`` mapping
-filenames to embedding vectors.  The assembler reads this during top-down
-search; the compactor and updater write it after creating/updating nodes.
+Replaces the old disk-based ``_embeddings.json`` approach entirely.
+Vectors are derived from the ``key`` field of each ``.md`` file and
+held in a single thread-safe dict owned by
+:class:`~memos.memories.textual.hierarchical_markdown_memory.HierarchicalMarkdownMemory`.
 
-Concurrent safety is achieved via:
-- File-level locking (``fcntl.flock``) for mutual exclusion
-- Atomic rename (write to ``.tmp``, then ``os.rename``) for crash safety
-- Monotonic ``_version`` counter for staleness detection
+No files are written.  On every :py:meth:`load` the cache is rebuilt
+from the ``.md`` files on disk in a single batch embed call.
 """
 
-import fcntl
-import json
-import os
+import threading
 
 from typing import Any
+
+import numpy as np
 
 from memos.log import get_logger
 
 
 logger = get_logger(__name__)
 
-EMBEDDINGS_FILENAME = "_embeddings.json"
-_LOCK_SUFFIX = ".lock"
 
+class EmbeddingCache:
+    """Thread-safe in-memory map: ``absolute_path → float32 vector``.
 
-class EmbeddingIndex:
-    """Manages ``_embeddings.json`` in a single directory."""
+    Keys are:
+    - Full path to a leaf ``.md`` file  (e.g. ``…/_fresh/001-hello.md``)
+    - Full path to a condensed directory (e.g. ``…/01-japan-trip/``)
+      — the vector encodes that directory's ``_summary.md`` ``key`` field.
 
-    def __init__(self, dir_path: str) -> None:
-        self.dir_path = dir_path
-        self._filepath = os.path.join(dir_path, EMBEDDINGS_FILENAME)
-        self._lockpath = self._filepath + _LOCK_SUFFIX
+    The *directory* path (without trailing slash) is used for condensed
+    nodes, **not** the ``_summary.md`` path, so callers can work with
+    ``os.path.join`` results directly.
+    """
 
-    def read(self) -> dict[str, list[float]]:
-        """Read the embedding index.  Returns ``{}`` if the file is missing."""
-        if not os.path.isfile(self._filepath):
-            return {}
-        try:
-            with open(self._filepath, encoding="utf-8") as f:
-                data = json.load(f)
-        except (json.JSONDecodeError, OSError):
-            logger.warning("Corrupt or unreadable %s, returning empty", self._filepath)
-            return {}
-        # Strip metadata keys
-        return {k: v for k, v in data.items() if not k.startswith("_")}
+    def __init__(self) -> None:
+        self._cache: dict[str, np.ndarray] = {}
+        self._lock = threading.Lock()
 
-    def read_meta(self) -> dict[str, Any]:
-        """Read the full index including metadata (``_version``, ``_model``)."""
-        if not os.path.isfile(self._filepath):
-            return {}
-        try:
-            with open(self._filepath, encoding="utf-8") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, OSError):
-            return {}
+    # ── Write ─────────────────────────────────────────────────────────────
 
-    def update(self, entries: dict[str, list[float]], model: str | None = None) -> None:
-        """Atomic read-modify-write: merge *entries* into the index.
+    def update(self, entries: dict[str, Any]) -> None:
+        """Merge *entries* into the cache.  Thread-safe.
 
-        Thread/process-safe via file lock + atomic rename.
+        Values may be ``list[float]`` or ``np.ndarray``; both are
+        converted to ``float32`` arrays.
         """
-        os.makedirs(self.dir_path, exist_ok=True)
-        lock_fd = self._acquire_lock()
-        try:
-            data = self._read_raw()
-            version = data.get("_version", 0)
-            data.update(entries)
-            data["_version"] = version + 1
-            if model:
-                data["_model"] = model
-            self._write_atomic(data)
-        finally:
-            self._release_lock(lock_fd)
+        with self._lock:
+            for k, v in entries.items():
+                self._cache[k] = np.asarray(v, dtype=np.float32)
 
-    def remove(self, keys: list[str]) -> None:
-        """Remove entries for *keys* from the index.  Thread-safe."""
-        os.makedirs(self.dir_path, exist_ok=True)
-        lock_fd = self._acquire_lock()
-        try:
-            data = self._read_raw()
-            changed = False
-            for k in keys:
-                if k in data:
-                    del data[k]
-                    changed = True
-            if changed:
-                data["_version"] = data.get("_version", 0) + 1
-                self._write_atomic(data)
-        finally:
-            self._release_lock(lock_fd)
+    def remove(self, paths: list[str]) -> None:
+        """Remove entries for *paths*.  Missing keys are silently ignored."""
+        with self._lock:
+            for p in paths:
+                self._cache.pop(p, None)
 
-    def version(self) -> int:
-        """Return the current version counter (0 if file missing)."""
-        meta = self.read_meta()
-        return meta.get("_version", 0)
+    def rename_prefix(self, old_prefix: str, new_prefix: str) -> None:
+        """Rename all entries whose path starts with *old_prefix*.
 
-    # ── Private helpers ───────────────────────────────────────────────────
+        Used when the compactor moves a directory: all cached paths
+        inside the old directory are updated to the new location in
+        a single locked pass.
 
-    def _read_raw(self) -> dict[str, Any]:
-        """Read the JSON file without lock (caller must hold lock)."""
-        if not os.path.isfile(self._filepath):
-            return {"_version": 0}
-        try:
-            with open(self._filepath, encoding="utf-8") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, OSError):
-            return {"_version": 0}
+        Works for both exact matches (the directory itself) and all
+        descendants (files inside the directory).
+        """
+        old = old_prefix.rstrip("/")
+        new = new_prefix.rstrip("/")
+        with self._lock:
+            to_rename = [k for k in self._cache if k == old or k.startswith(old + "/")]
+            for old_k in to_rename:
+                if old_k == old:
+                    new_k = new
+                else:
+                    new_k = new + old_k[len(old) :]
+                self._cache[new_k] = self._cache.pop(old_k)
 
-    def _write_atomic(self, data: dict[str, Any]) -> None:
-        """Write *data* to a temp file, then atomically rename."""
-        tmp_path = self._filepath + ".tmp"
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
-        os.replace(tmp_path, self._filepath)
+    def clear(self) -> None:
+        with self._lock:
+            self._cache.clear()
 
-    def _acquire_lock(self) -> int:
-        """Acquire an exclusive file lock.  Returns the lock file descriptor."""
-        fd = os.open(self._lockpath, os.O_CREAT | os.O_RDWR)
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        return fd
+    # ── Read ──────────────────────────────────────────────────────────────
 
-    def _release_lock(self, fd: int) -> None:
-        """Release the file lock."""
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        os.close(fd)
+    def get(self, path: str) -> np.ndarray | None:
+        """Return the vector for *path*, or ``None`` if not cached."""
+        return self._cache.get(path)
+
+    def children_of(self, dir_path: str) -> dict[str, np.ndarray]:
+        """Return ``{child_name: vector}`` for all direct children of *dir_path*.
+
+        A "direct child" has exactly one path component after *dir_path*
+        — it is either a leaf filename or a condensed subdirectory name,
+        not a deeper descendant.
+
+        This is the primary read interface for the assembler's top-down
+        tree walk and the compactor's clustering pass.
+        """
+        prefix = dir_path.rstrip("/") + "/"
+        result: dict[str, np.ndarray] = {}
+        # Snapshot under lock to avoid mutation during iteration
+        with self._lock:
+            snapshot = list(self._cache.items())
+        for path, vec in snapshot:
+            if path.startswith(prefix):
+                rest = path[len(prefix) :]
+                if rest and "/" not in rest:  # direct child only
+                    result[rest] = vec
+        return result
+
+    def __len__(self) -> int:
+        return len(self._cache)

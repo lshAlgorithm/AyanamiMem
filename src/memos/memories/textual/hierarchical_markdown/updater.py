@@ -14,7 +14,7 @@ from collections import deque
 from typing import Any
 
 from memos.log import get_logger
-from memos.memories.textual.hierarchical_markdown.embeddings import EmbeddingIndex
+from memos.memories.textual.hierarchical_markdown.embeddings import EmbeddingCache
 from memos.memories.textual.hierarchical_markdown.fs import (
     SUMMARY_FILENAME,
     list_children,
@@ -41,10 +41,12 @@ class Updater:
         memory_dir: str,
         summarizer: HierarchicalSummarizer,
         embedder: Any,
+        emb_cache: EmbeddingCache | None = None,
     ) -> None:
         self.memory_dir = memory_dir
         self.summarizer = summarizer
         self.embedder = embedder
+        self._emb_cache = emb_cache
         self._stale_queue: deque[str] = deque()
 
     # ── Public API ────────────────────────────────────────────────────────
@@ -148,16 +150,13 @@ class Updater:
 
         write_summary(dir_path, new_body, new_meta, children_links, extra_edges or None)
 
-        # Update parent embeddings
-        parent_dir = os.path.dirname(dir_path)
-        if os.path.isdir(parent_dir):
-            dir_name = os.path.basename(dir_path)
-            parent_idx = EmbeddingIndex(parent_dir)
+        # Update in-memory cache with the new summary key vector
+        if self._emb_cache is not None:
             try:
                 vec = self.embedder.embed([new_key])[0]
-                parent_idx.update({dir_name: vec})
+                self._emb_cache.update({dir_path: vec})
             except Exception:
-                logger.warning("Failed to update embedding for %s", dir_name)
+                logger.warning("Failed to update embedding for %s", dir_path)
 
         logger.info("Re-summarised stale node: %s", dir_path)
         return 1
