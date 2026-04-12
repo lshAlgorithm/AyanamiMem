@@ -230,6 +230,38 @@ class HierarchicalMarkdownMemoryConfig(BaseTextMemoryConfig):
         ),
     )
 
+    compact_merge_threshold: float = Field(
+        default=0.70,
+        description=(
+            "Cosine-similarity threshold for merging a new leaf cluster into an "
+            "existing depth-1 directory instead of creating a new one.  "
+            "Higher = more conservative (new dirs).  Lower = more aggressive merging."
+        ),
+    )
+
+    enable_bm25: bool = Field(
+        default=True,
+        description="Enable BM25 keyword search on leaf body text for hybrid retrieval.",
+    )
+
+    enable_mmr: bool = Field(
+        default=False,
+        description="Enable Maximal Marginal Relevance re-ranking for diversity.",
+    )
+
+    mmr_lambda: float = Field(
+        default=0.5,
+        description=("MMR trade-off parameter. 1.0 = pure relevance, 0.0 = pure diversity."),
+    )
+
+    hybrid_rrf_k: int = Field(
+        default=60,
+        description=(
+            "RRF constant k.  Higher values reduce the influence of top ranks.  "
+            "60 is the standard value used in production RAG systems."
+        ),
+    )
+
     context_threshold: float = Field(
         default=0.75,
         description="Fraction of leaf_chunk_tokens that triggers compaction.",
@@ -243,6 +275,23 @@ class HierarchicalMarkdownMemoryConfig(BaseTextMemoryConfig):
     git_auto_commit: bool = Field(
         default=False,
         description="If True, auto-commit every compaction/mutation to git.",
+    )
+
+    session_isolation: bool = Field(
+        default=False,
+        description=(
+            "If True, enable session-level memory isolation.  ``memory_dir`` is treated "
+            "as the root directory; each session gets its own subdirectory.  "
+            "A ``_public/`` directory is always visible to every session."
+        ),
+    )
+
+    session_id: str = Field(
+        default="default",
+        description=(
+            "Session identifier used when ``session_isolation`` is True.  "
+            "The effective memory directory becomes ``memory_dir / session_id``."
+        ),
     )
 
 

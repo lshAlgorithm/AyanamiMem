@@ -2,7 +2,12 @@
 
 The chunker splits a ``MessageList`` into token-bounded chunks and writes
 each chunk as a leaf file in the ``_fresh/`` staging directory.  The
-compactor later groups and moves these into the tree.
+compactor later groups these, generates an LLM summary for each cluster,
+and renames the leaf files using the summary key.
+
+The chunker itself makes **no LLM calls** — it uses a fast heuristic to
+generate an initial filename.  The leaf's final human-readable filename
+is set by the compactor once the cluster's topic is known.
 """
 
 import os
@@ -23,7 +28,6 @@ from memos.types import MessageList
 
 logger = get_logger(__name__)
 
-# Rough token estimate: 1 token ≈ 4 chars (conservative for English)
 _CHARS_PER_TOKEN = 4
 
 
@@ -36,7 +40,6 @@ def _format_message(msg: dict[str, Any]) -> str:
     role = msg.get("role", "unknown")
     content = msg.get("content", "")
     if isinstance(content, list):
-        # Handle multi-part content (text blocks)
         parts = []
         for block in content:
             if isinstance(block, dict) and block.get("type") == "text":
@@ -51,7 +54,13 @@ def _format_message(msg: dict[str, Any]) -> str:
 
 
 class ChatChunker:
-    """Split conversation messages into token-bounded leaf chunks."""
+    """Split conversation messages into token-bounded leaf chunks.
+
+    Leaves are written with a fast heuristic filename (first sentence of the
+    conversation).  Once the compactor groups leaves into a cluster and calls
+    the LLM, it renames each leaf using the LLM-generated cluster key and
+    updates the ``key`` / ``tags`` frontmatter fields in place.
+    """
 
     def __init__(
         self,
@@ -74,6 +83,8 @@ class ChatChunker:
         """Split *messages* into leaf ``.md`` files in ``_fresh/``.
 
         Returns list of written filenames (relative to ``_fresh/``).
+        The filename is a heuristic placeholder; the compactor renames
+        leaves to the LLM-generated cluster key after grouping.
         """
         if not messages:
             return []
@@ -86,7 +97,8 @@ class ChatChunker:
 
         for chunk_text, earliest, latest in chunks:
             token_count = _estimate_tokens(chunk_text)
-            # Generate key from first line or first 80 chars
+            # Fast heuristic key — no LLM call.
+            # Compactor will replace this with the LLM cluster key.
             key = self._extract_key(chunk_text)
 
             meta: dict[str, Any] = {
@@ -100,6 +112,7 @@ class ChatChunker:
                 "descendant_count": 1,
                 "stale": False,
                 "source": "conversation",
+                "tags": [],
             }
 
             seq = next_seq(self._fresh_dir)
@@ -108,14 +121,12 @@ class ChatChunker:
             write_md(fpath, chunk_text, meta)
             written.append(fname)
 
-            # Embed the key for search
             try:
                 vec = self.embedder.embed([key])[0]
                 emb_updates[fname] = vec
             except Exception:
                 logger.warning("Failed to embed leaf key: %s", key)
 
-        # Update in-memory embedding cache
         if emb_updates and self._emb_cache is not None:
             full_path_updates = {
                 os.path.join(self._fresh_dir, fname): vec for fname, vec in emb_updates.items()
@@ -126,10 +137,7 @@ class ChatChunker:
         return written
 
     def _split_messages(self, messages: MessageList) -> list[tuple[str, str, str]]:
-        """Split messages into token-bounded chunks.
-
-        Returns list of ``(chunk_text, earliest_timestamp, latest_timestamp)``.
-        """
+        """Split messages into token-bounded ``(text, earliest, latest)`` tuples."""
         now = datetime.now().isoformat()
         chunks: list[tuple[str, str, str]] = []
         current_lines: list[str] = []
@@ -141,10 +149,8 @@ class ChatChunker:
             line = _format_message(msg)
             line_tokens = _estimate_tokens(line)
 
-            # If adding this message would exceed the limit, flush current chunk
             if current_tokens + line_tokens > self.leaf_chunk_tokens and current_lines:
-                chunk_text = "\n\n".join(current_lines)
-                chunks.append((chunk_text, earliest, latest))
+                chunks.append(("\n\n".join(current_lines), earliest, latest))
                 current_lines = []
                 current_tokens = 0
                 earliest = now
@@ -153,29 +159,21 @@ class ChatChunker:
             current_tokens += line_tokens
             latest = now
 
-        # Flush remaining
         if current_lines:
-            chunk_text = "\n\n".join(current_lines)
-            chunks.append((chunk_text, earliest, latest))
+            chunks.append(("\n\n".join(current_lines), earliest, latest))
 
         return chunks
 
     @staticmethod
     def _extract_key(chunk_text: str) -> str:
-        """Extract a short key from the chunk content.
-
-        Uses the first meaningful sentence or first 80 chars.
-        """
-        # Take first non-empty line, strip the role prefix
+        """Fast heuristic: first meaningful sentence, role prefix stripped."""
         for line in chunk_text.splitlines():
             line = line.strip()
             if not line:
                 continue
-            # Strip "User: " / "Assistant: " prefix
             if ": " in line:
                 _, _, content = line.partition(": ")
                 line = content
-            # Truncate to reasonable length
             if len(line) > 80:
                 line = line[:77] + "..."
             return line

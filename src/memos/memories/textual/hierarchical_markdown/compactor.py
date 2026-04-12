@@ -21,8 +21,12 @@ from memos.memories.textual.hierarchical_markdown.embeddings import EmbeddingCac
 from memos.memories.textual.hierarchical_markdown.fs import (
     FRESH_DIR,
     SUMMARY_FILENAME,
+    leaf_filename,
+    list_children,
     next_seq,
+    read_md,
     subdir_name,
+    write_md,
     write_summary,
 )
 from memos.memories.textual.hierarchical_markdown.summarizer import HierarchicalSummarizer
@@ -134,7 +138,9 @@ class Compactor:
         fresh_tail_count: int = 4,
         condensed_min_fanout: int = 6,
         similarity_threshold: float = 0.5,
+        merge_threshold: float = 0.70,
         emb_cache: EmbeddingCache | None = None,
+        bm25_index: Any | None = None,
     ) -> None:
         self.memory_dir = memory_dir
         self.summarizer = summarizer
@@ -143,7 +149,9 @@ class Compactor:
         self.fresh_tail_count = fresh_tail_count
         self.condensed_min_fanout = condensed_min_fanout
         self.similarity_threshold = similarity_threshold
+        self.merge_threshold = merge_threshold
         self._emb_cache = emb_cache
+        self._bm25 = bm25_index
         self._fresh_dir = os.path.join(memory_dir, FRESH_DIR)
 
     # ── Public API ────────────────────────────────────────────────────────
@@ -175,7 +183,21 @@ class Compactor:
         clusters = _agglomerative_cluster(to_compact, emb_data, self.similarity_threshold)
 
         compacted_count = 0
-        moved_keys: list[str] = []
+
+        # Pre-compute existing depth-1 dir embeddings for merge decisions
+        existing_dirs: dict[str, np.ndarray] = {}
+        if self._emb_cache is not None:
+            for name, vec in self._emb_cache.children_of(self.memory_dir).items():
+                full = os.path.join(self.memory_dir, name)
+                if os.path.isdir(full):
+                    summary = os.path.join(full, SUMMARY_FILENAME)
+                    if os.path.isfile(summary):
+                        try:
+                            meta, _, _ = read_md(summary)
+                            if meta.get("depth", 0) == 1:
+                                existing_dirs[full] = vec
+                        except Exception:
+                            pass
 
         for cluster in clusters:
             if not cluster:
@@ -189,49 +211,114 @@ class Compactor:
             # Summarize the cluster
             summary_body, key, tags = self.summarizer.summarize(existing_paths, depth=1)
 
-            # Create subdirectory
-            seq = next_seq(self.memory_dir, for_dir=True)
-            dirname = subdir_name(seq, key)
-            target_dir = os.path.join(self.memory_dir, dirname)
-            os.makedirs(target_dir, exist_ok=True)
+            # ── Decide: merge into existing dir or create new one ────────────
+            target_dir: str | None = None
+            if existing_dirs and self._emb_cache is not None:
+                try:
+                    cluster_vec = np.array(self.embedder.embed([key])[0], dtype=np.float64)
+                    best_sim, best_dir = 0.0, ""
+                    for dir_path, dir_vec in existing_dirs.items():
+                        sim = float(
+                            np.dot(cluster_vec, dir_vec.astype(np.float64))
+                            / (np.linalg.norm(cluster_vec) * np.linalg.norm(dir_vec) + 1e-9)
+                        )
+                        if sim > best_sim:
+                            best_sim, best_dir = sim, dir_path
+                    if best_sim >= self.merge_threshold:
+                        target_dir = best_dir
+                        logger.info(
+                            "Merging cluster '%s' into existing dir '%s' (sim=%.3f)",
+                            key,
+                            os.path.basename(best_dir),
+                            best_sim,
+                        )
+                except Exception:
+                    logger.warning("Merge similarity check failed; creating new dir")
 
-            # Move leaf files into the new directory
+            # ── Move leaves into target_dir (existing or new) ────────────────
+            if target_dir is None:
+                seq = next_seq(self.memory_dir, for_dir=True)
+                dirname = subdir_name(seq, key)
+                target_dir = os.path.join(self.memory_dir, dirname)
+                os.makedirs(target_dir, exist_ok=True)
+
             children_links: list[tuple[str, str]] = []
-            for leaf_name in cluster:
+            for leaf_seq, leaf_name in enumerate(cluster, start=1):
                 src = os.path.join(self._fresh_dir, leaf_name)
                 if not os.path.isfile(src):
                     continue
-                dst = os.path.join(target_dir, leaf_name)
+
+                # Rename the leaf to the LLM-generated cluster key.
+                # Same LLM call that produced _summary.md — zero extra cost.
+                new_fname = leaf_filename(leaf_seq, key)
+                dst = os.path.join(target_dir, new_fname)
+
+                # Update frontmatter key + tags before renaming
+                leaf_body = ""
+                try:
+                    leaf_meta, leaf_body, leaf_edges = read_md(src)
+                    leaf_meta["key"] = key
+                    leaf_meta["tags"] = tags
+                    write_md(src, leaf_body, leaf_meta, leaf_edges if leaf_edges else None)
+                except Exception:
+                    logger.warning("Failed to update frontmatter for %s", src)
+
                 os.rename(src, dst)
-                # Update in-memory cache: rename old path to new path
+
+                # Sync embedding cache (path rename)
                 if self._emb_cache is not None:
                     self._emb_cache.rename_prefix(src, dst)
-                children_links.append((leaf_name.rsplit(".", 1)[0], f"./{leaf_name}"))
-                moved_keys.append(leaf_name)
+                # Sync BM25 index (old path removed, new path + new key indexed)
+                if self._bm25 is not None:
+                    self._bm25.remove([src])
+                    self._bm25.update({dst: key + " " + leaf_body})
+
+                children_links.append((new_fname.rsplit(".", 1)[0], f"./{new_fname}"))
                 compacted_count += 1
 
-            # Write _summary.md in the new directory
+            # ── Write or update _summary.md ──────────────────────────────────
+            summary_path = os.path.join(target_dir, SUMMARY_FILENAME)
             now_iso = datetime.now().isoformat()
-            summary_meta: dict[str, Any] = {
-                "key": key,
-                "depth": 1,
-                "node_kind": "condensed",
-                "earliest_at": now_iso,
-                "latest_at": now_iso,
-                "token_count": len(summary_body) // 4,
-                "descendant_count": len(children_links),
-                "stale": False,
-                "tags": tags,
-            }
-            write_summary(target_dir, summary_body, summary_meta, children_links)
 
-            # Register the new condensed dir in the cache
-            if self._emb_cache is not None:
+            if os.path.isfile(summary_path):
+                # Merge into existing dir: keep old leaves, add new ones, mark stale
                 try:
-                    summary_vec = self.embedder.embed([key])[0]
-                    self._emb_cache.update({target_dir: summary_vec})
+                    old_meta, _old_body, old_edges = read_md(summary_path)
+                    old_children = old_edges.get("Children", [])
+                    merged_children = old_children + children_links
+                    old_meta["stale"] = True
+                    old_meta["descendant_count"] = len(merged_children)
+                    old_meta["latest_at"] = now_iso
+                    write_summary(target_dir, _old_body, old_meta, merged_children)
+                    logger.debug("Marked %s stale after merge", summary_path)
                 except Exception:
-                    logger.warning("Failed to embed summary key for %s", dirname)
+                    logger.warning("Failed to update existing _summary.md at %s", target_dir)
+            else:
+                # New dir: write fresh _summary.md
+                # Rebuild full children list from what's now in target_dir
+                all_children = list_children(target_dir)
+                summary_meta: dict[str, Any] = {
+                    "key": key,
+                    "depth": 1,
+                    "node_kind": "condensed",
+                    "earliest_at": now_iso,
+                    "latest_at": now_iso,
+                    "token_count": len(summary_body) // 4,
+                    "descendant_count": len(all_children),
+                    "stale": False,
+                    "tags": tags,
+                }
+                write_summary(target_dir, summary_body, summary_meta, all_children)
+
+                # Register new dir in cache
+                if self._emb_cache is not None:
+                    try:
+                        summary_vec = self.embedder.embed([key])[0]
+                        self._emb_cache.update({target_dir: summary_vec})
+                        # Also track it as an existing dir for subsequent clusters
+                        existing_dirs[target_dir] = np.array(summary_vec, dtype=np.float64)
+                    except Exception:
+                        logger.warning("Failed to embed summary key for %s", target_dir)
 
         logger.info(
             "Leaf pass compacted %d leaves into %d clusters", compacted_count, len(clusters)

@@ -5,6 +5,7 @@ compactor, summarizer, assembler, and updater components.  All state
 lives on the filesystem as ``.md`` files.
 """
 
+import contextlib
 import os
 import shutil
 import threading
@@ -16,8 +17,10 @@ from memos.configs.memory import HierarchicalMarkdownMemoryConfig
 from memos.embedders.factory import EmbedderFactory
 from memos.llms.factory import LLMFactory
 from memos.log import get_logger
+from memos.mem_user.session_manager import SessionManager
 from memos.memories.textual.base import BaseTextMemory
 from memos.memories.textual.hierarchical_markdown.assembler import Assembler
+from memos.memories.textual.hierarchical_markdown.bm25_index import BM25Index
 from memos.memories.textual.hierarchical_markdown.chunker import ChatChunker
 from memos.memories.textual.hierarchical_markdown.compactor import Compactor
 from memos.memories.textual.hierarchical_markdown.embeddings import EmbeddingCache
@@ -76,13 +79,30 @@ class HierarchicalMarkdownMemory(BaseTextMemory):
 
     def __init__(self, config: HierarchicalMarkdownMemoryConfig) -> None:
         self.config = config
-        self.memory_dir = os.path.abspath(config.memory_dir)
+        root_dir = os.path.abspath(config.memory_dir)
+
+        # ── Session isolation ─────────────────────────────────────────────
+        if config.session_isolation:
+            self.session_manager: SessionManager | None = SessionManager(root_dir)
+            self.session_id: str = config.session_id
+            self.session_manager.register_session(config.session_id, user_id=config.session_id)
+            # Effective memory dir is root_dir / session_id
+            self.memory_dir = self.session_manager.session_dir(config.session_id)
+            # _public/ is always readable by every session
+            self._public_dir: str | None = self.session_manager.public_dir()
+        else:
+            self.session_manager = None
+            self.session_id = config.session_id
+            self.memory_dir = root_dir
+            self._public_dir = None
 
         self.llm = LLMFactory.from_config(config.extractor_llm)
         self.embedder = EmbedderFactory.from_config(config.embedder)
 
         # Single in-memory embedding cache shared across all components
         self._emb_cache = EmbeddingCache()
+        # BM25 keyword index over leaf body text (leaves only, not summaries)
+        self._bm25 = BM25Index() if config.enable_bm25 else None
 
         self.summarizer = HierarchicalSummarizer(
             self.llm, self.embedder, config.condensed_target_tokens
@@ -101,9 +121,19 @@ class HierarchicalMarkdownMemory(BaseTextMemory):
             condensed_min_fanout=config.condensed_min_fanout,
             compact_threshold=config.compact_threshold,
             similarity_threshold=config.compact_similarity_threshold,
+            merge_threshold=config.compact_merge_threshold,
             emb_cache=self._emb_cache,
+            bm25_index=self._bm25,
         )
-        self.assembler = Assembler(self.memory_dir, self.embedder, emb_cache=self._emb_cache)
+        self.assembler = Assembler(
+            self.memory_dir,
+            self.embedder,
+            emb_cache=self._emb_cache,
+            bm25_index=self._bm25,
+            enable_mmr=config.enable_mmr,
+            mmr_lambda=config.mmr_lambda,
+            hybrid_rrf_k=config.hybrid_rrf_k,
+        )
         self.updater = Updater(
             self.memory_dir, self.summarizer, self.embedder, emb_cache=self._emb_cache
         )
@@ -124,6 +154,7 @@ class HierarchicalMarkdownMemory(BaseTextMemory):
         filenames = self.chunker.chunk(messages)
         items: list[TextualMemoryItem] = []
         fresh_dir = os.path.join(self.memory_dir, FRESH_DIR)
+        bm25_entries: dict[str, str] = {}
         for fname in filenames:
             fpath = os.path.join(fresh_dir, fname)
             try:
@@ -131,8 +162,12 @@ class HierarchicalMarkdownMemory(BaseTextMemory):
                 item = _meta_to_textual(meta, body, fpath)
                 self._register_path(fpath, item.id)
                 items.append(item)
+                if self._bm25 is not None:
+                    bm25_entries[fpath] = meta.get("key", "") + " " + body
             except Exception:
                 logger.exception("Failed to read chunked leaf: %s", fpath)
+        if bm25_entries and self._bm25 is not None:
+            self._bm25.update(bm25_entries)
         return items
 
     def add(self, memories: list[TextualMemoryItem | dict[str, Any]], **kwargs: Any) -> list[str]:
@@ -173,12 +208,14 @@ class HierarchicalMarkdownMemory(BaseTextMemory):
             self._register_path(fpath, item_id)
             new_ids.append(item_id)
 
-            # Update in-memory embedding cache
+            # Update in-memory caches (embedding + BM25)
             try:
                 vec = self.embedder.embed([meta["key"]])[0]
                 self._emb_cache.update({fpath: vec})
             except Exception:
                 logger.warning("Failed to embed new leaf: %s", fname)
+            if self._bm25 is not None:
+                self._bm25.update({fpath: meta["key"] + " " + mem.memory})
 
         # Trigger compaction in background
         self._maybe_compact()
@@ -211,12 +248,37 @@ class HierarchicalMarkdownMemory(BaseTextMemory):
     def search(
         self, query: str, top_k: int, info: Any = None, **kwargs: Any
     ) -> list[TextualMemoryItem]:
-        """Search via top-down tree walk + fresh tail."""
+        """Search via top-down tree walk + fresh tail.
+
+        When session isolation is active, also searches ``_public/`` and
+        merges results (deduplicating by path), always ranking session-owned
+        results first.
+        """
         results = self.assembler.assemble(
             query=query,
-            budget_tokens=top_k * 500,  # rough budget
+            budget_tokens=top_k * 500,
             fresh_tail_count=self.config.fresh_tail_count,
         )
+
+        # Also search _public/ when session isolation is active
+        if self._public_dir and os.path.isdir(self._public_dir):
+            public_assembler = Assembler(
+                self._public_dir,
+                self.embedder,
+                emb_cache=self._emb_cache,
+                bm25_index=self._bm25,
+                enable_mmr=self.config.enable_mmr,
+                mmr_lambda=self.config.mmr_lambda,
+                hybrid_rrf_k=self.config.hybrid_rrf_k,
+            )
+            public_results = public_assembler.assemble(
+                query=query,
+                budget_tokens=top_k * 250,  # smaller budget for public
+                fresh_tail_count=0,
+            )
+            # Merge: session results first, then public (no duplicates)
+            seen = {r["path"] for r in results}
+            results = results + [r for r in public_results if r["path"] not in seen]
 
         items: list[TextualMemoryItem] = []
         for r in results[:top_k]:
@@ -276,6 +338,8 @@ class HierarchicalMarkdownMemory(BaseTextMemory):
             # Remove the file
             os.remove(path)
             self._unregister_path(path)
+            if self._bm25 is not None:
+                self._bm25.remove([path])
 
             # Mark parent summary stale
             summary_path = os.path.join(parent_dir, SUMMARY_FILENAME)
@@ -300,6 +364,9 @@ class HierarchicalMarkdownMemory(BaseTextMemory):
                     os.remove(full)
         self._path_cache.clear()
         self._uuid_cache.clear()
+        self._emb_cache.clear()
+        if self._bm25 is not None:
+            self._bm25.clear()
         # Re-create _fresh/
         os.makedirs(os.path.join(self.memory_dir, FRESH_DIR), exist_ok=True)
 
@@ -321,7 +388,7 @@ class HierarchicalMarkdownMemory(BaseTextMemory):
                 shutil.rmtree(target)
             shutil.copytree(self.memory_dir, target)
 
-    def load(self, dir: str) -> None:  # noqa: A002
+    def load(self, dir: str) -> None:
         """Load memory tree from *dir* (set as the new memory_dir)."""
         dir_path = dir
         self.memory_dir = os.path.abspath(dir_path)
@@ -339,9 +406,19 @@ class HierarchicalMarkdownMemory(BaseTextMemory):
             condensed_min_fanout=self.config.condensed_min_fanout,
             compact_threshold=self.config.compact_threshold,
             similarity_threshold=self.config.compact_similarity_threshold,
+            merge_threshold=self.config.compact_merge_threshold,
             emb_cache=self._emb_cache,
+            bm25_index=self._bm25,
         )
-        self.assembler = Assembler(self.memory_dir, self.embedder, emb_cache=self._emb_cache)
+        self.assembler = Assembler(
+            self.memory_dir,
+            self.embedder,
+            emb_cache=self._emb_cache,
+            bm25_index=self._bm25,
+            enable_mmr=self.config.enable_mmr,
+            mmr_lambda=self.config.mmr_lambda,
+            hybrid_rrf_k=self.config.hybrid_rrf_k,
+        )
         self.updater = Updater(
             self.memory_dir, self.summarizer, self.embedder, emb_cache=self._emb_cache
         )
@@ -382,6 +459,80 @@ class HierarchicalMarkdownMemory(BaseTextMemory):
                     lines.append(f"  - {f}")
         return "\n".join(lines) + "\n"
 
+    # ── Session management helpers ────────────────────────────────────────
+
+    def grant_access(
+        self,
+        grantee_session_id: str,
+        scope: str = "read",
+        subtree_path: str | None = None,
+    ) -> None:
+        """Grant *grantee_session_id* access to this session's memories.
+
+        Requires ``session_isolation=True``.  Records the grant in
+        ``_sessions.json``.  Feature 3 will read this to create symlinks.
+        """
+        if self.session_manager is None:
+            raise RuntimeError("session_isolation must be True to use grant_access")
+        self.session_manager.grant_access(
+            granting_session=self.session_id,
+            grantee_session=grantee_session_id,
+            scope=scope,
+            subtree_path=subtree_path,
+        )
+
+    def revoke_access(
+        self,
+        grantee_session_id: str,
+        subtree_path: str | None = None,
+    ) -> None:
+        """Revoke a previously granted access."""
+        if self.session_manager is None:
+            raise RuntimeError("session_isolation must be True to use revoke_access")
+        self.session_manager.revoke_access(
+            granting_session=self.session_id,
+            grantee_session=grantee_session_id,
+            subtree_path=subtree_path,
+        )
+
+    def write_public(self, memories: list["TextualMemoryItem | dict[str, Any]"]) -> list[str]:
+        """Write memories to ``_public/`` — visible to every session.
+
+        Uses the same write path as ``add()`` but targets ``_public/``
+        instead of the session directory.
+        """
+        if self._public_dir is None:
+            # If isolation is off, _public/ isn't set up — write normally
+            return self.add(memories)
+
+        from memos.memories.textual.hierarchical_markdown.fs import write_leaf
+
+        public_fresh = os.path.join(self._public_dir, FRESH_DIR)
+        os.makedirs(public_fresh, exist_ok=True)
+        new_ids: list[str] = []
+
+        for mem in memories:
+            if isinstance(mem, dict):
+                from memos.memories.textual.item import TextualMemoryItem as TItem
+
+                mem = TItem(**mem)
+            meta = {
+                "key": mem.metadata.key or mem.memory[:60],
+                "depth": 0,
+                "node_kind": "leaf",
+                "source": "public",
+                "tags": mem.metadata.tags or [],
+                "stale": False,
+                "descendant_count": 1,
+            }
+            fname = write_leaf(public_fresh, mem.memory, meta)
+            fpath = os.path.join(public_fresh, fname)
+            item_id = _path_to_uuid(fpath)
+            self._register_path(fpath, item_id)
+            new_ids.append(item_id)
+
+        return new_ids
+
     # ── Private helpers ───────────────────────────────────────────────────
 
     def _maybe_compact(self) -> None:
@@ -409,16 +560,14 @@ class HierarchicalMarkdownMemory(BaseTextMemory):
             self._uuid_cache.pop(item_id, None)
 
     def _rebuild_cache(self) -> None:
-        """Rebuild path↔UUID cache + embedding cache from the filesystem.
-
-        Also removes any stale ``_embeddings.json`` files found on disk —
-        embeddings are now held exclusively in memory.
-        """
+        """Rebuild path↔UUID cache, embedding cache, and BM25 index from the filesystem."""
         self._path_cache.clear()
         self._uuid_cache.clear()
         self._emb_cache.clear()
+        if self._bm25 is not None:
+            self._bm25.clear()
 
-        # Collect all .md paths, distinguishing summaries from leaves
+        # Collect all .md paths
         all_paths: list[str] = walk_tree(self.memory_dir)
         fresh_dir = os.path.join(self.memory_dir, FRESH_DIR)
         if os.path.isdir(fresh_dir):
@@ -431,21 +580,24 @@ class HierarchicalMarkdownMemory(BaseTextMemory):
             item_id = _path_to_uuid(path)
             self._register_path(path, item_id)
 
-        # Batch-embed all keys from frontmatter
-        cache_keys: list[str] = []  # embedding cache key (dir or leaf path)
-        embed_texts: list[str] = []  # key phrase to embed
+        # Batch-embed all keys + batch-index BM25 leaves
+        cache_keys: list[str] = []
+        embed_texts: list[str] = []
+        bm25_entries: dict[str, str] = {}
 
         for path in all_paths:
             try:
-                meta, _, _ = read_md(path)
+                meta, body, _ = read_md(path)
                 key = meta.get("key", "")
                 if not key:
                     continue
-                # For _summary.md → cache key is the parent directory
                 if os.path.basename(path) == SUMMARY_FILENAME:
                     cache_key = os.path.dirname(path)
                 else:
                     cache_key = path
+                    # Leaves only go into BM25
+                    if self._bm25 is not None:
+                        bm25_entries[path] = key + " " + body
                 cache_keys.append(cache_key)
                 embed_texts.append(key)
             except Exception:
@@ -454,16 +606,20 @@ class HierarchicalMarkdownMemory(BaseTextMemory):
         if embed_texts:
             try:
                 vecs = self.embedder.embed(embed_texts)
-                self._emb_cache.update({k: v for k, v in zip(cache_keys, vecs)})
+                self._emb_cache.update(dict(zip(cache_keys, vecs, strict=False)))
             except Exception:
                 logger.warning("Batch embed failed during _rebuild_cache; cache empty")
+
+        if bm25_entries and self._bm25 is not None:
+            self._bm25.update(bm25_entries)
 
         # Delete stale _embeddings.json files from disk
         self._cleanup_json_index_files(self.memory_dir)
         logger.info(
-            "Cache rebuilt: %d paths, %d embeddings",
+            "Cache rebuilt: %d paths, %d embeddings, %d BM25 docs",
             len(self._path_cache),
             len(self._emb_cache),
+            len(self._bm25) if self._bm25 else 0,
         )
 
     @staticmethod
@@ -472,10 +628,8 @@ class HierarchicalMarkdownMemory(BaseTextMemory):
         for dirpath, _dirs, files in os.walk(root_dir):
             for fname in files:
                 if fname in ("_embeddings.json", "_embeddings.json.lock", "_embeddings.json.tmp"):
-                    try:
+                    with contextlib.suppress(OSError):
                         os.remove(os.path.join(dirpath, fname))
-                    except OSError:
-                        pass
 
     def _render_tree(self, dir_path: str, lines: list[str], indent: int) -> None:
         """Recursively render the directory tree."""

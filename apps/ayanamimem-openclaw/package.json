@@ -1,0 +1,34 @@
+{
+  "name": "@memtensor/ayanamimem-openclaw-plugin",
+  "version": "0.1.0",
+  "description": "AyanamiMem: session-isolated hierarchical memory with BM25+vector hybrid search. Stores memories as human-readable .md files. No database, no Python bridge.",
+  "type": "module",
+  "main": "index.ts",
+  "author": "MemTensor",
+  "license": "MIT",
+  "scripts": {
+    "postinstall": "node scripts/postinstall.cjs"
+  },
+  "openclaw": {
+    "id": "ayanamimem-openclaw-plugin",
+    "extensions": ["./index.ts"],
+    "skills": ["skill/ayanamimem-guide"],
+    "installDependencies": true
+  },
+  "clawdbot": {
+    "id": "ayanamimem-openclaw-plugin",
+    "extensions": ["./index.ts"]
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^3.8.0",
+    "js-yaml": "^4.1.0"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.0"
+  }
+}

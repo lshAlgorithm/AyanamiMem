@@ -1,0 +1,83 @@
+{
+  "id": "ayanamimem-openclaw-plugin",
+  "name": "AyanamiMem",
+  "description": "Session-isolated hierarchical memory with BM25+vector hybrid search. Human-readable .md files, local embeddings, no database required.",
+  "version": "0.1.0",
+  "kind": "lifecycle",
+  "main": "./index.ts",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "memoryRoot": {
+        "type": "string",
+        "description": "Root directory for all session memory trees (default: ~/.ayanamimem/sessions)"
+      },
+      "sessionId": {
+        "type": "string",
+        "description": "Override session ID. Default: derived from event.agentId."
+      },
+      "topK": {
+        "type": "integer",
+        "default": 5,
+        "description": "Number of memories to recall per query."
+      },
+      "freshTailCount": {
+        "type": "integer",
+        "default": 2,
+        "description": "Most-recent leaves always included verbatim, never compacted."
+      },
+      "compactThreshold": {
+        "type": "integer",
+        "default": 3,
+        "description": "Non-tail leaves in _fresh/ before auto-compaction triggers."
+      },
+      "compactSimilarity": {
+        "type": "number",
+        "default": 0.3,
+        "description": "Cosine threshold for clustering leaves into topic groups."
+      },
+      "mergeThreshold": {
+        "type": "number",
+        "default": 0.7,
+        "description": "Cosine threshold for merging a new cluster into an existing dir."
+      },
+      "chatModel": {
+        "type": "string",
+        "description": "LLM model for memory extraction and summarisation."
+      },
+      "embeddingModel": {
+        "type": "string",
+        "default": "Xenova/all-MiniLM-L6-v2",
+        "description": "Local Transformers.js model for embeddings."
+      },
+      "enableBm25": {
+        "type": "boolean",
+        "default": true,
+        "description": "Enable BM25Plus keyword search alongside vector search."
+      },
+      "enableMmr": {
+        "type": "boolean",
+        "default": false,
+        "description": "Enable Maximal Marginal Relevance diversity re-ranking."
+      },
+      "rrfK": {
+        "type": "integer",
+        "default": 60,
+        "description": "RRF constant k (higher = less aggressive top-rank boosting)."
+      }
+    }
+  },
+  "requirements": {
+    "node": ">=18.0.0"
+  },
+  "setup": {
+    "postInstall": "node scripts/postinstall.cjs",
+    "notes": [
+      "Set OPENAI_API_KEY and OPENAI_BASE_URL for LLM memory extraction/summarisation.",
+      "Optional: set EMBEDDER_MODEL to a local model path for offline embeddings.",
+      "Optional: set MEMORY_ROOT to customize where .md session files are stored.",
+      "Memory files are stored as human-readable Markdown — open them in any editor."
+    ]
+  }
+}
